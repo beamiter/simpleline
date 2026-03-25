@@ -128,6 +128,20 @@ def FtIcon(): string
   return ''
 enddef
 
+def BufFtIcon(bn: number): string
+  if !get(g:, 'simpleline_nerdfont', 1)
+    return ''
+  endif
+  var ft = getbufvar(bn, '&filetype')
+  if type(ft) != v:t_string || ft ==# ''
+    return ''
+  endif
+  if has_key(s_ft_icons, ft)
+    return s_ft_icons[ft] .. ' '
+  endif
+  return ''
+enddef
+
 # ----------- Git info -----------
 def GitStr(): string
   var dir = expand('%:p:h')
@@ -622,61 +636,139 @@ def TablinePickMode(): string
 
   var s = ''
   var curbn = bufnr('%')
-  var first = true
-  var prev_is_cur = false
 
-  if left_omitted
-    s ..= '%#SimpleTablineInactive#' .. ellipsis
-  endif
+  var style = get(g:, 'simpleline_separator', 'arrow')
+  var use_powerline = (style !=# 'plain')
 
   s_char_to_bufnr = {}
   var char_idx = 0
 
-  for vbn in visible
-    var k = string(vbn)
-    if !has_key(bynr, k)
-      continue
+  if use_powerline
+    # Powerline-style pick mode
+    if left_omitted
+      s ..= '%#SimpleTablineFill# … '
     endif
-    var b = bynr[k]
-    var is_cur = (b.bufnr == curbn)
 
-    if !first
-      var use_cur_sep = (prev_is_cur || is_cur)
-      if use_cur_sep
-        s ..= '%#SimpleTablineSepCurrent#' .. sep .. '%#None#'
+    var is_first = true
+    var prev_is_active = false
+
+    for vbn in visible
+      var k = string(vbn)
+      if !has_key(bynr, k)
+        continue
+      endif
+      var b = bynr[k]
+      var is_cur = (b.bufnr == curbn)
+
+      # Powerline separator
+      if is_first
+        if is_cur
+          s ..= '%#SimpleTabFillToAct#' .. s_sep_l
+        else
+          s ..= '%#SimpleTabFillToInact#' .. s_sep_l
+        endif
       else
-        s ..= '%#SimpleTablineSep#' .. sep .. '%#None#'
+        if prev_is_active && !is_cur
+          s ..= '%#SimpleTabActToInact#' .. s_sep_l
+        elseif !prev_is_active && is_cur
+          s ..= '%#SimpleTabInactToAct#' .. s_sep_l
+        elseif prev_is_active && is_cur
+          s ..= '%#SimpleTabActToInact#' .. s_sep_l
+        else
+          s ..= '%#SimpleTabInactSep#' .. s_subsep_l
+        endif
+      endif
+
+      var hint_char = ''
+      if char_idx < len(s_pick_chars)
+        hint_char = s_pick_chars[char_idx]
+        s_char_to_bufnr[hint_char] = b.bufnr
+        char_idx += 1
+      endif
+
+      var icon = BufFtIcon(b.bufnr)
+      var name = BufDisplayName(b)
+      var show_mod = TabConf('simpletabline_show_modified', 1) != 0
+      var mod_mark = (show_mod && get(b, 'changed', 0) == 1) ? ' +' : ''
+      var grp_item = is_cur ? '%#SimpleTablineActive#' : '%#SimpleTablineInactive#'
+
+      if hint_char !=# '' && len(name) > 0
+        s ..= grp_item .. ' %#SimpleTablinePickHint#' .. hint_char .. grp_item .. ' ' .. icon .. name .. mod_mark .. ' '
+      else
+        s ..= grp_item .. ' ' .. icon .. name .. mod_mark .. ' '
+      endif
+
+      is_first = false
+      prev_is_active = is_cur
+    endfor
+
+    # Right separator
+    if !is_first
+      if prev_is_active
+        s ..= '%#SimpleTabActToFill#' .. s_sep_l
+      else
+        s ..= '%#SimpleTabInactToFill#' .. s_sep_l
       endif
     endif
 
-    var hint_char = ''
-    if char_idx < len(s_pick_chars)
-      hint_char = s_pick_chars[char_idx]
-      s_char_to_bufnr[hint_char] = b.bufnr
-      char_idx += 1
+    if right_omitted
+      s ..= '%#SimpleTablineFill# … '
+    endif
+  else
+    # Plain-style pick mode (fallback)
+    var first = true
+    var prev_is_cur = false
+
+    if left_omitted
+      s ..= '%#SimpleTablineInactive#' .. ellipsis
     endif
 
-    var name = BufDisplayName(b)
-    var show_mod = TabConf('simpletabline_show_modified', 1) != 0
-    var mod_mark = (show_mod && get(b, 'changed', 0) == 1) ? ' +' : ''
+    for vbn in visible
+      var k = string(vbn)
+      if !has_key(bynr, k)
+        continue
+      endif
+      var b = bynr[k]
+      var is_cur = (b.bufnr == curbn)
 
-    var grp_item = is_cur ? '%#SimpleTablineActive#' : '%#SimpleTablineInactive#'
-    var name_part = ''
+      if !first
+        var use_cur_sep = (prev_is_cur || is_cur)
+        if use_cur_sep
+          s ..= '%#SimpleTablineSepCurrent#' .. sep .. '%#None#'
+        else
+          s ..= '%#SimpleTablineSep#' .. sep .. '%#None#'
+        endif
+      endif
 
-    if hint_char !=# '' && len(name) > 0
-      name_part = '%#SimpleTablinePickHint#' .. hint_char .. '%#None#'
-            \ .. grp_item .. name .. mod_mark .. '%#None#'
-    else
-      name_part = grp_item .. name .. mod_mark .. '%#None#'
+      var hint_char = ''
+      if char_idx < len(s_pick_chars)
+        hint_char = s_pick_chars[char_idx]
+        s_char_to_bufnr[hint_char] = b.bufnr
+        char_idx += 1
+      endif
+
+      var name = BufDisplayName(b)
+      var show_mod = TabConf('simpletabline_show_modified', 1) != 0
+      var mod_mark = (show_mod && get(b, 'changed', 0) == 1) ? ' +' : ''
+
+      var grp_item = is_cur ? '%#SimpleTablineActive#' : '%#SimpleTablineInactive#'
+      var name_part = ''
+
+      if hint_char !=# '' && len(name) > 0
+        name_part = '%#SimpleTablinePickHint#' .. hint_char .. '%#None#'
+              \ .. grp_item .. name .. mod_mark .. '%#None#'
+      else
+        name_part = grp_item .. name .. mod_mark .. '%#None#'
+      endif
+
+      s ..= name_part
+      first = false
+      prev_is_cur = is_cur
+    endfor
+
+    if right_omitted
+      s ..= '%#SimpleTablineInactive#' .. ellipsis .. '%#None#'
     endif
-
-    s ..= name_part
-    first = false
-    prev_is_cur = is_cur
-  endfor
-
-  if right_omitted
-    s ..= '%#SimpleTablineInactive#' .. ellipsis .. '%#None#'
   endif
 
   s ..= '%=%#SimpleTablineFill#'
@@ -732,65 +824,136 @@ export def Tabline(): string
 
   var s = ''
   var curbn = bufnr('%')
-
-  if left_omitted
-    s ..= '%#SimpleTablineInactive#' .. ellipsis
-  endif
-
   s_pick_map = copy(s_idx_to_buf)
 
-  var first = true
-  var prev_is_cur = false
+  var style = get(g:, 'simpleline_separator', 'arrow')
+  var use_powerline = (style !=# 'plain')
 
-  for vbn in visible
-    var k = string(vbn)
-    if !has_key(bynr, k)
-      continue
+  if use_powerline
+    # Powerline-style tabline
+    if left_omitted
+      s ..= '%#SimpleTablineFill# … '
     endif
-    var b = bynr[k]
-    var is_cur = (b.bufnr == curbn)
 
-    if !first
-      var use_cur_sep = (prev_is_cur || is_cur)
-      if use_cur_sep
-        s ..= '%#SimpleTablineSepCurrent#' .. sep .. '%#None#'
+    var is_first = true
+    var prev_is_active = false
+
+    for vbn in visible
+      var k = string(vbn)
+      if !has_key(bynr, k)
+        continue
+      endif
+      var b = bynr[k]
+      var is_cur = (b.bufnr == curbn)
+
+      # Powerline separator before this item
+      if is_first
+        if is_cur
+          s ..= '%#SimpleTabFillToAct#' .. s_sep_l
+        else
+          s ..= '%#SimpleTabFillToInact#' .. s_sep_l
+        endif
       else
-        s ..= '%#SimpleTablineSep#' .. sep .. '%#None#'
+        if prev_is_active && is_cur
+          s ..= '%#SimpleTabActToInact#' .. s_sep_l
+        elseif prev_is_active && !is_cur
+          s ..= '%#SimpleTabActToInact#' .. s_sep_l
+        elseif !prev_is_active && is_cur
+          s ..= '%#SimpleTabInactToAct#' .. s_sep_l
+        else
+          s ..= '%#SimpleTabInactSep#' .. s_subsep_l
+        endif
+      endif
+
+      # Buffer content with padding
+      var icon = BufFtIcon(b.bufnr)
+      var key_raw = get(buf_keys, string(b.bufnr), '')
+      var key_txt = key_raw
+      if key_txt !=# '' && TabConfBool('simpletabline_superscript_index', true)
+        key_txt = SupDigit(key_txt)
+      endif
+      var key_part = ''
+      if show_keys && key_txt !=# ''
+        var key_grp = is_cur ? '%#SimpleTablineIndexActive#' : '%#SimpleTablineIndex#'
+        key_part = key_grp .. key_txt .. ' '
+      endif
+
+      var grp_item = is_cur ? '%#SimpleTablineActive#' : '%#SimpleTablineInactive#'
+      var name = BufDisplayName(b)
+      var show_mod = TabConf('simpletabline_show_modified', 1) != 0
+      var mod_mark = (show_mod && get(b, 'changed', 0) == 1) ? ' +' : ''
+
+      s ..= grp_item .. ' ' .. key_part .. icon .. name .. mod_mark .. ' '
+
+      is_first = false
+      prev_is_active = is_cur
+    endfor
+
+    # Powerline separator after last item
+    if !is_first
+      if prev_is_active
+        s ..= '%#SimpleTabActToFill#' .. s_sep_l
+      else
+        s ..= '%#SimpleTabInactToFill#' .. s_sep_l
       endif
     endif
 
-    var key_raw = get(buf_keys, string(b.bufnr), '')
-    var key_txt = key_raw
-    if key_txt !=# '' && TabConfBool('simpletabline_superscript_index', true)
-      key_txt = SupDigit(key_txt)
+    if right_omitted
+      s ..= '%#SimpleTablineFill# … '
     endif
-    var key_part = ''
-    if show_keys && key_txt !=# ''
-      var key_grp = is_cur ? '%#SimpleTablineIndexActive#' : '%#SimpleTablineIndex#'
-      var sep_key = TabConf('simpletabline_key_sep', '')
-      key_part = key_grp .. key_txt .. '%#None#' .. sep_key
+  else
+    # Plain-style tabline (fallback)
+    if left_omitted
+      s ..= '%#SimpleTablineInactive#' .. ellipsis
     endif
 
-    var grp_item = is_cur ? '%#SimpleTablineActive#' : '%#SimpleTablineInactive#'
-    var name = BufDisplayName(b)
-    var show_mod = TabConf('simpletabline_show_modified', 1) != 0
-    var mod_mark = (show_mod && get(b, 'changed', 0) == 1) ? ' +' : ''
-    var name_part = grp_item .. name .. mod_mark .. '%#None#'
+    var first = true
+    var prev_is_cur = false
 
-    var item = key_part .. name_part
+    for vbn in visible
+      var k = string(vbn)
+      if !has_key(bynr, k)
+        continue
+      endif
+      var b = bynr[k]
+      var is_cur = (b.bufnr == curbn)
 
-    if s ==# ''
-      s = item
-    else
-      s ..= item
+      if !first
+        var use_cur_sep = (prev_is_cur || is_cur)
+        if use_cur_sep
+          s ..= '%#SimpleTablineSepCurrent#' .. sep .. '%#None#'
+        else
+          s ..= '%#SimpleTablineSep#' .. sep .. '%#None#'
+        endif
+      endif
+
+      var key_raw = get(buf_keys, string(b.bufnr), '')
+      var key_txt = key_raw
+      if key_txt !=# '' && TabConfBool('simpletabline_superscript_index', true)
+        key_txt = SupDigit(key_txt)
+      endif
+      var key_part = ''
+      if show_keys && key_txt !=# ''
+        var key_grp = is_cur ? '%#SimpleTablineIndexActive#' : '%#SimpleTablineIndex#'
+        var sep_key = TabConf('simpletabline_key_sep', '')
+        key_part = key_grp .. key_txt .. '%#None#' .. sep_key
+      endif
+
+      var grp_item = is_cur ? '%#SimpleTablineActive#' : '%#SimpleTablineInactive#'
+      var name = BufDisplayName(b)
+      var show_mod = TabConf('simpletabline_show_modified', 1) != 0
+      var mod_mark = (show_mod && get(b, 'changed', 0) == 1) ? ' +' : ''
+      var name_part = grp_item .. name .. mod_mark .. '%#None#'
+
+      s ..= key_part .. name_part
+
+      first = false
+      prev_is_cur = is_cur
+    endfor
+
+    if right_omitted
+      s ..= '%#SimpleTablineInactive#' .. ellipsis .. '%#None#'
     endif
-
-    first = false
-    prev_is_cur = is_cur
-  endfor
-
-  if right_omitted
-    s ..= '%#SimpleTablineInactive#' .. ellipsis .. '%#None#'
   endif
 
   s ..= '%=%#SimpleTablineFill#'

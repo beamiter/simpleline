@@ -45,30 +45,48 @@ highlight SimpleTablinePickHint guifg=#ff0000 ctermfg=red gui=bold cterm=bold
 set showtabline=2
 
 def g:SimpleTablineApplyHL()
+  # TabLineSel (active buffer)
   var id_sel   = synIDtrans(hlID('TabLineSel'))
-  var bg_gui_s = synIDattr(id_sel, 'bg#', 'gui')
-  var bg_ctm_s = synIDattr(id_sel, 'bg',  'cterm')
-  if bg_gui_s ==# '' | bg_gui_s = 'NONE' | endif
-  if bg_ctm_s ==# '' || bg_ctm_s =~# '^\D' | bg_ctm_s = 'NONE' | endif
+  var sel_bg_gui = synIDattr(id_sel, 'bg#', 'gui')
+  var sel_bg_ctm = synIDattr(id_sel, 'bg',  'cterm')
+  if sel_bg_gui ==# '' | sel_bg_gui = 'NONE' | endif
+  if sel_bg_ctm ==# '' || sel_bg_ctm =~# '^\D' | sel_bg_ctm = 'NONE' | endif
 
   var cyan_gui   = g:simpletabline_cyan_gui
   var cyan_cterm = g:simpletabline_cyan_cterm
 
-  execute 'highlight SimpleTablineSepCurrent guifg=' .. cyan_gui .. ' guibg=' .. bg_gui_s .. ' gui=bold ctermfg=' .. cyan_cterm .. ' ctermbg=' .. bg_ctm_s .. ' cterm=bold'
-  execute 'highlight SimpleTablineActive     guifg=' .. cyan_gui .. ' guibg=' .. bg_gui_s .. ' gui=bold ctermfg=' .. cyan_cterm .. ' ctermbg=' .. bg_ctm_s .. ' cterm=bold'
-  execute 'highlight SimpleTablineIndexActive guifg=' .. cyan_gui .. ' guibg=' .. bg_gui_s .. ' gui=bold ctermfg=' .. cyan_cterm .. ' ctermbg=' .. bg_ctm_s .. ' cterm=bold'
+  execute 'highlight SimpleTablineSepCurrent guifg=' .. cyan_gui .. ' guibg=' .. sel_bg_gui .. ' gui=bold ctermfg=' .. cyan_cterm .. ' ctermbg=' .. sel_bg_ctm .. ' cterm=bold'
+  execute 'highlight SimpleTablineActive     guifg=' .. cyan_gui .. ' guibg=' .. sel_bg_gui .. ' gui=bold ctermfg=' .. cyan_cterm .. ' ctermbg=' .. sel_bg_ctm .. ' cterm=bold'
+  execute 'highlight SimpleTablineIndexActive guifg=' .. cyan_gui .. ' guibg=' .. sel_bg_gui .. ' gui=bold ctermfg=' .. cyan_cterm .. ' ctermbg=' .. sel_bg_ctm .. ' cterm=bold'
 
+  # TabLine (inactive buffer)
   var id_inact    = synIDtrans(hlID('TabLine'))
-  var sep_bg_gui  = synIDattr(id_inact, 'bg#', 'gui')
-  var sep_bg_ctm  = synIDattr(id_inact, 'bg',  'cterm')
-  var sep_fg_gui  = synIDattr(id_inact, 'fg#', 'gui')
-  var sep_fg_ctm  = synIDattr(id_inact, 'fg',  'cterm')
-  if sep_bg_gui ==# '' | sep_bg_gui = 'NONE' | endif
-  if sep_bg_ctm ==# '' || sep_bg_ctm =~# '^\D' | sep_bg_ctm = 'NONE' | endif
-  if sep_fg_gui ==# '' | sep_fg_gui = 'NONE' | endif
-  if sep_fg_ctm ==# '' || sep_fg_ctm =~# '^\D' | sep_fg_ctm = 'NONE' | endif
+  var tl_bg_gui  = synIDattr(id_inact, 'bg#', 'gui')
+  var tl_bg_ctm  = synIDattr(id_inact, 'bg',  'cterm')
+  var tl_fg_gui  = synIDattr(id_inact, 'fg#', 'gui')
+  var tl_fg_ctm  = synIDattr(id_inact, 'fg',  'cterm')
+  if tl_bg_gui ==# '' | tl_bg_gui = 'NONE' | endif
+  if tl_bg_ctm ==# '' || tl_bg_ctm =~# '^\D' | tl_bg_ctm = 'NONE' | endif
+  if tl_fg_gui ==# '' | tl_fg_gui = 'NONE' | endif
+  if tl_fg_ctm ==# '' || tl_fg_ctm =~# '^\D' | tl_fg_ctm = 'NONE' | endif
 
-  execute 'highlight SimpleTablineSep guifg=' .. sep_fg_gui .. ' guibg=' .. sep_bg_gui .. ' ctermfg=' .. sep_fg_ctm .. ' ctermbg=' .. sep_bg_ctm
+  execute 'highlight SimpleTablineSep guifg=' .. tl_fg_gui .. ' guibg=' .. tl_bg_gui .. ' ctermfg=' .. tl_fg_ctm .. ' ctermbg=' .. tl_bg_ctm
+
+  # TabLineFill (background)
+  var id_fill    = synIDtrans(hlID('TabLineFill'))
+  var fill_bg_gui = synIDattr(id_fill, 'bg#', 'gui')
+  var fill_bg_ctm = synIDattr(id_fill, 'bg',  'cterm')
+  if fill_bg_gui ==# '' | fill_bg_gui = 'NONE' | endif
+  if fill_bg_ctm ==# '' || fill_bg_ctm =~# '^\D' | fill_bg_ctm = 'NONE' | endif
+
+  # Powerline transition highlights (fg = left section bg, bg = right section bg)
+  execute 'highlight SimpleTabFillToAct    guifg=' .. fill_bg_gui .. ' guibg=' .. sel_bg_gui .. ' ctermfg=' .. fill_bg_ctm .. ' ctermbg=' .. sel_bg_ctm
+  execute 'highlight SimpleTabFillToInact  guifg=' .. fill_bg_gui .. ' guibg=' .. tl_bg_gui .. ' ctermfg=' .. fill_bg_ctm .. ' ctermbg=' .. tl_bg_ctm
+  execute 'highlight SimpleTabActToFill    guifg=' .. sel_bg_gui .. ' guibg=' .. fill_bg_gui .. ' ctermfg=' .. sel_bg_ctm .. ' ctermbg=' .. fill_bg_ctm
+  execute 'highlight SimpleTabInactToFill  guifg=' .. tl_bg_gui .. ' guibg=' .. fill_bg_gui .. ' ctermfg=' .. tl_bg_ctm .. ' ctermbg=' .. fill_bg_ctm
+  execute 'highlight SimpleTabActToInact   guifg=' .. sel_bg_gui .. ' guibg=' .. tl_bg_gui .. ' ctermfg=' .. sel_bg_ctm .. ' ctermbg=' .. tl_bg_ctm
+  execute 'highlight SimpleTabInactToAct   guifg=' .. tl_bg_gui .. ' guibg=' .. sel_bg_gui .. ' ctermfg=' .. tl_bg_ctm .. ' ctermbg=' .. sel_bg_ctm
+  execute 'highlight SimpleTabInactSep     guifg=' .. fill_bg_gui .. ' guibg=' .. tl_bg_gui .. ' ctermfg=' .. fill_bg_ctm .. ' ctermbg=' .. tl_bg_ctm
 enddef
 
 # =============================================================
