@@ -219,6 +219,9 @@ def SetupHighlights()
   # Git
   highlight SimpleLineGit       guibg=#3e4452 guifg=#e5c07b ctermfg=180 ctermbg=238
 
+  # LSP (simplecc)
+  highlight SimpleLineLSP       guibg=#3e4452 guifg=#56b6c2 ctermfg=73 ctermbg=238
+
   # Inactive
   highlight SimpleLineInactive  guibg=#282c34 guifg=#5c6370 ctermfg=241 ctermbg=235
 
@@ -251,6 +254,12 @@ export def ActiveStatusline(): string
 
   # Right align
   s ..= '%='
+
+  # LSP status (simplecc)
+  var lsp = get(g:, 'simplecc_status', '')
+  if lsp !=# ''
+    s ..= '%#SimpleLineLSP# ' .. lsp .. ' '
+  endif
 
   # Right section
   s ..= '%#SimpleLineRightSep#' .. s_sep_r
