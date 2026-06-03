@@ -88,7 +88,7 @@ def ModeHl(): string
     return '%#SimpleLineInsert#'
   elseif m ==# 'R'
     return '%#SimpleLineReplace#'
-  elseif m ==# 'v' || m ==# 'V' || m ==# "\<C-V>"
+  elseif m ==# 'v' || m ==# 'V' || m ==# "\<C-V>" || m ==# 's' || m ==# 'S' || m ==# "\<C-S>"
     return '%#SimpleLineVisual#'
   elseif m ==# 'c'
     return '%#SimpleLineCommand#'
@@ -105,7 +105,7 @@ def ModeSepHl(): string
     return '%#SimpleLineInsertSep#'
   elseif m ==# 'R'
     return '%#SimpleLineReplaceSep#'
-  elseif m ==# 'v' || m ==# 'V' || m ==# "\<C-V>"
+  elseif m ==# 'v' || m ==# 'V' || m ==# "\<C-V>" || m ==# 's' || m ==# 'S' || m ==# "\<C-S>"
     return '%#SimpleLineVisualSep#'
   elseif m ==# 'c'
     return '%#SimpleLineCommandSep#'
@@ -244,9 +244,10 @@ export def ActiveStatusline(): string
     s ..= '%#SimpleLineGit# ' .. git .. ' '
   endif
 
-  # Middle: filename
+  # Middle: filename. %< marks the truncation point so a long path is shortened
+  # here instead of Vim eating the mode/git segments from the left.
   s ..= '%#SimpleLineMid#'
-  s ..= ' ' .. FtIcon() .. '%f'
+  s ..= ' ' .. FtIcon() .. '%<%f'
   s ..= '%( %m%r%)'
 
   # Separator to background
@@ -278,7 +279,7 @@ export def ActiveStatusline(): string
 enddef
 
 export def InactiveStatusline(): string
-  return '%#SimpleLineInactive# %f%( %m%r%) %= %l:%c '
+  return '%#SimpleLineInactive# %<%f%( %m%r%) %= %l:%c '
 enddef
 
 # =============================================================
