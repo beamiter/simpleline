@@ -1,10 +1,21 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-cargo build --release
+root_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+cd "$root_dir"
 
-rm -rf lib
+cargo build --release --locked
 mkdir -p lib
-cp target/release/simpleline-daemon lib/
+tmp_binary="$(mktemp "$root_dir/lib/.simpleline-daemon.XXXXXX")"
+trap 'rm -f "$tmp_binary"' EXIT
+install -m 0755 target/release/simpleline-daemon "$tmp_binary"
+mv -f "$tmp_binary" lib/simpleline-daemon
+trap - EXIT
 
-echo "Installed to ./lib. Ensure this plugin directory is on 'runtimepath'."
+if command -v vim >/dev/null 2>&1; then
+  vim -Nu NONE -n -i NONE -es -c 'helptags doc' -c 'qa!'
+else
+  echo "Warning: Vim was not found on PATH; run :helptags $root_dir/doc manually." >&2
+fi
+
+echo "Installed simpleline-daemon to $root_dir/lib/simpleline-daemon"

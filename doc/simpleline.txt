@@ -1,0 +1,166 @@
+*simpleline.txt* *simpleline*  Responsive Vim9 statusline and buffer tabline
+
+===============================================================================
+CONTENTS                                                     *simpleline-contents*
+
+  1. Introduction ............... |simpleline-introduction|
+  2. Installation ............... |simpleline-installation|
+  3. Commands ................... |simpleline-commands|
+  4. Mappings ................... |simpleline-mappings|
+  5. Configuration .............. |simpleline-configuration|
+  6. Integrations ............... |simpleline-integrations|
+  7. Troubleshooting ............ |simpleline-troubleshooting|
+
+===============================================================================
+INTRODUCTION                                             *simpleline-introduction*
+
+Simpleline provides a Vim9script statusline and buffer-oriented tabline. The
+core UI requires Vim 9.1 with +vim9script. Git queries run in an asynchronous
+Rust daemon and additionally require +job, +channel, Git, and Rust/Cargo 1.78
+or newer for building. +timers is needed only for polling. Neovim is not
+supported.
+
+Dynamic text (filenames, refs, provider text) is escaped before it reaches the
+statusline parser. Disabling Simpleline restores the global and per-window
+options that it replaced.
+
+===============================================================================
+INSTALLATION                                             *simpleline-installation*
+
+For vim-plug: >
+
+  Plug 'beamiter/simpleline', {'do': './install.sh'}
+<
+Or run `./install.sh` inside the plugin checkout. The script builds and
+installs lib/simpleline-daemon. Git can be disabled before load: >
+
+  let g:simpleline_git_enabled = 0
+<
+When `vim` is on PATH, the installer also generates help tags; otherwise it
+prints the manual command. After a manual copy, run: >
+
+  :helptags /path/to/simpleline/doc
+<
+Rerun the build/install step after every source update. Native Windows users
+should build with `cargo build --release --locked` and copy
+target/release/simpleline-daemon.exe to lib/simpleline-daemon.exe.
+===============================================================================
+COMMANDS                                                     *simpleline-commands*
+
+                                                    *:SimpleLine*
+:SimpleLine         Enable statusline/tabline management.
+
+                                                    *:SimpleLineDisable*
+:SimpleLineDisable  Disable and restore prior option values.
+
+                                                    *:SimpleLineToggle*
+:SimpleLineToggle   Toggle enabled state.
+
+                                                    *:SimpleLineReload*
+:SimpleLineReload   Apply changed configuration.
+
+                                                    *:SimpleLineGitRefresh*
+:SimpleLineGitRefresh
+                    Request Git data for the current buffer directory.
+
+                                                    *:SimpleLineHealth*
+:SimpleLineHealth   Report Vim features, daemon state, cache, and last error.
+
+                                                    *:SimpleLineDebug*
+:SimpleLineDebug    Health report plus the complete Git cache.
+
+                                                    *:BufferPick*
+:BufferPick         Show buffer hints and consume one key without remapping it.
+
+                                                    *:SimpleLineBufferJump*
+:SimpleLineBufferJump {0-9}
+                    Jump to a visible indexed buffer. The legacy commands
+                    :BufferJump1 through :BufferJump0 are also supported.
+
+===============================================================================
+MAPPINGS                                                     *simpleline-mappings*
+
+The defaults <Leader>bp and <Leader>bj are created only when those keys are
+unmapped. Disable them and use <Plug> mappings: >
+
+  let g:simpleline_enable_default_mappings = 0
+  nmap <Leader>b <Plug>(simpleline-buffer-pick)
+  nmap <Leader>1 <Plug>(simpleline-buffer-jump-1)
+<
+Jump targets exist for 0 through 9.
+
+===============================================================================
+CONFIGURATION                                           *simpleline-configuration*
+
+Set variables before plugin loading. Use :SimpleLineReload after visual/runtime
+changes. simpleline_auto_enable and simpleline_enable_default_mappings are
+load-time settings; restart Vim to apply them.
+
+CORE ~
+g:simpleline_auto_enable              1
+g:simpleline_statusline               1
+g:simpleline_tabline                  1
+g:simpleline_separator                'arrow' ('round', 'plain')
+g:simpleline_nerdfont                 1
+g:simpleline_compact_width            80 (0 disables compact mode)
+g:simpleline_show_filetype            1
+g:simpleline_show_encoding            1
+g:simpleline_show_fileformat          1
+g:simpleline_show_position            1 (active also shows percentage)
+g:simpleline_show_lsp                 1
+g:simpleline_filetype_icons           {}
+g:simpleline_debug                    0
+g:simpleline_enable_default_mappings  1
+
+When statusline management is enabled, Simpleline raises 'laststatus' to 2 if
+needed and restores the old value on disable. Compact mode keeps the branch and
+position while hiding file metadata, Git counts, and ahead/behind.
+
+GIT ~
+g:simpleline_git_enabled              1
+g:simpleline_git_interval             2000 ms; minimum 250; 0 is event-only
+g:simpleline_git_show_status          1
+g:simpleline_daemon_path              '' (search runtimepath/lib)
+
+TABLINE ~
+g:simpletabline_show_modified         1
+g:simpletabline_show_indexes          1
+g:simpletabline_superscript_index     1
+g:simpletabline_listed_only           1 (0 uses loaded normal buffers)
+g:simpletabline_path_mode             'abbr' (tail, rel, abbr, abs; rel/abbr
+                                      use basename outside the path root)
+g:simpletabline_fallback_cwd_root     1
+g:simpletabline_newbuf_side           'right'
+g:simpletabline_pick_chars            'asdfjkl;ghqweruiopzxcvbnm'
+g:simpletabline_item_sep              ' | '
+g:simpletabline_key_sep               '  '
+g:simpletabline_ellipsis              ' … '
+g:simpletabline_cyan_gui              '#00ffff'
+g:simpletabline_cyan_cterm            '14'
+
+===============================================================================
+INTEGRATIONS                                             *simpleline-integrations*
+
+When simpletree#GetRoot() exists it supplies the path root. Otherwise cwd is
+used when g:simpletabline_fallback_cwd_root is enabled.
+
+A non-empty g:simplecc_status string is shown as a compatibility LSP/provider
+segment. It is escaped and rendered literally.
+
+SimpleLine* highlight groups use `:highlight default`. Define them before
+Simpleline to override the built-in palette. Tabline transitions derive from
+TabLine, TabLineSel, and TabLineFill on ColorScheme.
+
+===============================================================================
+TROUBLESHOOTING                                       *simpleline-troubleshooting*
+
+No Git information        Run :SimpleLineHealth, :SimpleLineGitRefresh, then
+                          ./install.sh if version/protocol stays unknown/0.
+Broken icon glyphs        Install a Nerd Font or set simpleline_nerdfont to 0.
+Polling is unnecessary    Set simpleline_git_interval to 0.
+Need daemon errors        Set simpleline_debug to 1 and inspect :messages.
+No visible statusline     Check 'laststatus' in :SimpleLineHealth; Simpleline
+                          raises values below 2 and restores them on disable.
+
+===============================================================================
+vim:tw=78:ts=8:noet:ft=help:norl:
