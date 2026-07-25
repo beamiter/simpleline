@@ -24,6 +24,13 @@ Dynamic text (filenames, refs, provider text) is escaped before it reaches the
 statusline parser. Disabling Simpleline restores the global and per-window
 options that it replaced.
 
+Beyond mode/file/Git/position, the statusline can show a search count while
+'hlsearch' highlighting is active, a REC @reg indicator while recording a
+macro, and error/warning counts from an auto-detected diagnostics provider
+(coc.nvim, ALE, or vim-lsp — first match wins). The tabline accepts mouse
+clicks: left click switches to the clicked buffer, middle click deletes it
+when it has no unsaved changes.
+
 ===============================================================================
 INSTALLATION                                             *simpleline-installation*
 
@@ -108,6 +115,9 @@ g:simpleline_show_encoding            1
 g:simpleline_show_fileformat          1
 g:simpleline_show_position            1 (active also shows percentage)
 g:simpleline_show_lsp                 1
+g:simpleline_show_search              1 (current/total while v:hlsearch)
+g:simpleline_show_recording           1 (REC @reg while recording)
+g:simpleline_show_diagnostics         1 (E:n W:n from coc/ALE/vim-lsp)
 g:simpleline_filetype_icons           {}
 g:simpleline_debug                    0
 g:simpleline_enable_default_mappings  1
@@ -122,6 +132,11 @@ g:simpleline_git_interval             2000 ms; minimum 250; 0 is event-only
 g:simpleline_git_show_status          1
 g:simpleline_daemon_path              '' (search runtimepath/lib)
 
+The Git segment shows the branch, ahead/behind, added/modified/deleted
+counts, conflicts as !n, and stashes as $n. Stash counting requires Git 2.15
+(--show-stash); the daemon probes `git --version` once and skips the flag on
+older installations. Compact windows keep the branch and conflicts.
+
 TABLINE ~
 g:simpletabline_show_modified         1
 g:simpletabline_show_indexes          1
@@ -131,6 +146,7 @@ g:simpletabline_path_mode             'abbr' (tail, rel, abbr, abs; rel/abbr
                                       use basename outside the path root)
 g:simpletabline_fallback_cwd_root     1
 g:simpletabline_newbuf_side           'right'
+g:simpletabline_clickable             1 (left click switches, middle deletes)
 g:simpletabline_pick_chars            'asdfjkl;ghqweruiopzxcvbnm'
 g:simpletabline_item_sep              ' | '
 g:simpletabline_key_sep               '  '

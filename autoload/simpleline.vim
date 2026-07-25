@@ -143,54 +143,19 @@ def ModeKind(): string
   return 'normal'
 enddef
 
-def ModeName(): string
-  var kind = ModeKind()
-  if kind ==# 'insert'
-    return 'INSERT'
-  elseif kind ==# 'replace'
-    return 'REPLACE'
-  elseif kind ==# 'visual'
-    return 'VISUAL'
-  elseif kind ==# 'select'
-    return 'SELECT'
-  elseif kind ==# 'command'
-    return 'COMMAND'
-  elseif kind ==# 'terminal'
-    return 'TERMINAL'
-  endif
-  return 'NORMAL'
-enddef
+# kind -> [label, body highlight, separator highlight]
+var s_mode_specs: dict<list<string>> = {
+  normal:   ['NORMAL',   'SimpleLineNormal',   'SimpleLineNormalSep'],
+  insert:   ['INSERT',   'SimpleLineInsert',   'SimpleLineInsertSep'],
+  replace:  ['REPLACE',  'SimpleLineReplace',  'SimpleLineReplaceSep'],
+  visual:   ['VISUAL',   'SimpleLineVisual',   'SimpleLineVisualSep'],
+  select:   ['SELECT',   'SimpleLineVisual',   'SimpleLineVisualSep'],
+  command:  ['COMMAND',  'SimpleLineCommand',  'SimpleLineCommandSep'],
+  terminal: ['TERMINAL', 'SimpleLineTerminal', 'SimpleLineTerminalSep'],
+}
 
-def ModeHl(): string
-  var kind = ModeKind()
-  if kind ==# 'insert'
-    return '%#SimpleLineInsert#'
-  elseif kind ==# 'replace'
-    return '%#SimpleLineReplace#'
-  elseif kind ==# 'visual' || kind ==# 'select'
-    return '%#SimpleLineVisual#'
-  elseif kind ==# 'command'
-    return '%#SimpleLineCommand#'
-  elseif kind ==# 'terminal'
-    return '%#SimpleLineTerminal#'
-  endif
-  return '%#SimpleLineNormal#'
-enddef
-
-def ModeSepHl(): string
-  var kind = ModeKind()
-  if kind ==# 'insert'
-    return '%#SimpleLineInsertSep#'
-  elseif kind ==# 'replace'
-    return '%#SimpleLineReplaceSep#'
-  elseif kind ==# 'visual' || kind ==# 'select'
-    return '%#SimpleLineVisualSep#'
-  elseif kind ==# 'command'
-    return '%#SimpleLineCommandSep#'
-  elseif kind ==# 'terminal'
-    return '%#SimpleLineTerminalSep#'
-  endif
-  return '%#SimpleLineNormalSep#'
+def ModeSpec(): list<string>
+  return get(s_mode_specs, ModeKind(), s_mode_specs.normal)
 enddef
 
 # ----------- Filetype icon -----------
@@ -281,7 +246,94 @@ def GitStr(): string
   if len(stats) > 0
     parts->add('[' .. join(stats, ' ') .. ']')
   endif
+  # Conflicts are always worth attention; stash count follows the detailed
+  # metadata and disappears in compact windows.
+  var conflicts = get(info, 'conflicts', 0)
+  if conflicts > 0
+    parts->add('!' .. conflicts)
+  endif
+  var stash = IsCompact() ? 0 : get(info, 'stash', 0)
+  if stash > 0
+    parts->add('$' .. stash)
+  endif
   return join(parts, ' ')
+enddef
+
+# ----------- Extra statusline segments -----------
+def RecordingStr(): string
+  if !ConfBool('simpleline_show_recording', true) || !exists('*reg_recording')
+    return ''
+  endif
+  var reg = reg_recording()
+  return reg ==# '' ? '' : 'REC @' .. reg
+enddef
+
+def SearchStr(): string
+  if !ConfBool('simpleline_show_search', true) || !v:hlsearch
+        \ || !exists('*searchcount')
+    return ''
+  endif
+  var result: dict<any>
+  try
+    result = searchcount({maxcount: 99, timeout: 20})
+  catch
+    return ''
+  endtry
+  var total = get(result, 'total', 0)
+  if type(total) != v:t_number || total <= 0
+    return ''
+  endif
+  var current = get(result, 'current', 0)
+  var total_txt = get(result, 'incomplete', 0) == 2 ? '99+' : string(total)
+  return current .. '/' .. total_txt
+enddef
+
+def DiagCount(value: any): number
+  return type(value) == v:t_number && value > 0 ? value : 0
+enddef
+
+# Diagnostics from the first detected provider: coc.nvim, ALE, then vim-lsp.
+def DiagnosticCounts(): dict<number>
+  var coc = getbufvar(bufnr('%'), 'coc_diagnostic_info', {})
+  if type(coc) == v:t_dict && !empty(coc)
+    return {
+      error: DiagCount(get(coc, 'error', 0)),
+      warning: DiagCount(get(coc, 'warning', 0)),
+    }
+  endif
+  if exists('*ale#statusline#Count')
+    try
+      var counts = ale#statusline#Count(bufnr('%'))
+      return {
+        error: DiagCount(get(counts, 'error', 0)) + DiagCount(get(counts, 'style_error', 0)),
+        warning: DiagCount(get(counts, 'warning', 0)) + DiagCount(get(counts, 'style_warning', 0)),
+      }
+    catch
+    endtry
+  endif
+  if exists('*lsp#get_buffer_diagnostics_counts')
+    try
+      var counts = lsp#get_buffer_diagnostics_counts()
+      return {
+        error: DiagCount(get(counts, 'error', 0)),
+        warning: DiagCount(get(counts, 'warning', 0)),
+      }
+    catch
+    endtry
+  endif
+  return {error: 0, warning: 0}
+enddef
+
+def DiagProviderName(): string
+  var coc = getbufvar(bufnr('%'), 'coc_diagnostic_info', {})
+  if type(coc) == v:t_dict && !empty(coc)
+    return 'coc'
+  elseif exists('*ale#statusline#Count')
+    return 'ale'
+  elseif exists('*lsp#get_buffer_diagnostics_counts')
+    return 'vim-lsp'
+  endif
+  return 'none'
 enddef
 
 # ----------- Highlight groups -----------
@@ -320,6 +372,16 @@ def SetupHighlights()
   # LSP (simplecc)
   highlight default SimpleLineLSP       guibg=#3e4452 guifg=#56b6c2 ctermfg=73 ctermbg=238
 
+  # Macro recording indicator
+  highlight default SimpleLineRec       guibg=#e06c75 guifg=#282c34 gui=bold ctermfg=235 ctermbg=168 cterm=bold
+
+  # Diagnostics
+  highlight default SimpleLineDiagError guibg=#3e4452 guifg=#e06c75 ctermfg=168 ctermbg=238
+  highlight default SimpleLineDiagWarn  guibg=#3e4452 guifg=#e5c07b ctermfg=180 ctermbg=238
+
+  # Search count
+  highlight default SimpleLineSearch    guibg=#3e4452 guifg=#98c379 ctermfg=114 ctermbg=238
+
   # Inactive
   highlight default SimpleLineInactive  guibg=#282c34 guifg=#5c6370 ctermfg=241 ctermbg=235
 
@@ -334,13 +396,31 @@ export def ActiveStatusline(): string
   var compact = IsCompact()
 
   # Mode
-  s ..= ModeHl() .. ' ' .. ModeName() .. ' '
-  s ..= ModeSepHl() .. s_sep_l
+  var mode_spec = ModeSpec()
+  s ..= '%#' .. mode_spec[1] .. '# ' .. mode_spec[0] .. ' '
+  s ..= '%#' .. mode_spec[2] .. '#' .. s_sep_l
+
+  # Macro recording indicator
+  var recording = RecordingStr()
+  if recording !=# ''
+    s ..= '%#SimpleLineRec# ' .. RenderEscape(recording) .. ' '
+  endif
 
   # Git info
   var git = GitStr()
   if git !=# ''
     s ..= '%#SimpleLineGit# ' .. git .. ' '
+  endif
+
+  # Diagnostics (coc.nvim / ALE / vim-lsp)
+  if ConfBool('simpleline_show_diagnostics', true)
+    var diag = DiagnosticCounts()
+    if diag.error > 0
+      s ..= '%#SimpleLineDiagError# E:' .. diag.error .. ' '
+    endif
+    if diag.warning > 0
+      s ..= '%#SimpleLineDiagWarn# W:' .. diag.warning .. ' '
+    endif
   endif
 
   # Middle: filename. %< marks the truncation point so a long path is shortened
@@ -354,6 +434,12 @@ export def ActiveStatusline(): string
 
   # Right align
   s ..= '%='
+
+  # Search count while highlighting is active
+  var search = SearchStr()
+  if search !=# ''
+    s ..= '%#SimpleLineSearch# ' .. search .. ' '
+  endif
 
   # LSP status (simplecc compatibility provider)
   var lsp = get(g:, 'simplecc_status', '')
@@ -900,6 +986,33 @@ def TablinePickMode(): string
   return s
 enddef
 
+# ----------- Mouse support -----------
+# %N@simpleline#TablineClick@ labels; Vim calls this on tabline clicks with the
+# buffer number as minwid. Left click switches, middle click deletes.
+export def TablineClick(minwid: number, clicks: number, button: string, mods: string)
+  if !bufexists(minwid)
+    return
+  endif
+  if button ==# 'm'
+    var modified = getbufvar(minwid, '&modified')
+    if type(modified) != v:t_string && modified
+      echo '[SimpleLine] buffer ' .. minwid .. ' has unsaved changes'
+      return
+    endif
+    try
+      execute 'bdelete ' .. minwid
+    catch
+      DebugLog('failed to delete buffer ' .. minwid .. ': ' .. v:exception)
+    endtry
+  elseif button ==# 'l'
+    try
+      execute 'buffer ' .. minwid
+    catch
+      DebugLog('failed to switch to buffer ' .. minwid .. ': ' .. v:exception)
+    endtry
+  endif
+enddef
+
 # ----------- Main tabline -----------
 export def Tabline(): string
   if s_pick_mode
@@ -941,6 +1054,7 @@ export def Tabline(): string
   var curbn = bufnr('%')
   var style = SeparatorStyle()
   var use_powerline = (style !=# 'plain') && ConfBool('simpleline_nerdfont', true)
+  var clickable = TabConfBool('simpletabline_clickable', true)
 
   if use_powerline
     # Powerline-style tabline
@@ -996,7 +1110,10 @@ export def Tabline(): string
       var show_mod = TabConfBool('simpletabline_show_modified', true)
       var mod_mark = (show_mod && get(b, 'changed', 0) == 1) ? ' +' : ''
 
-      s ..= grp_item .. ' ' .. key_part .. icon .. name .. mod_mark .. ' '
+      var label = grp_item .. ' ' .. key_part .. icon .. name .. mod_mark .. ' '
+      s ..= clickable
+            \ ? '%' .. b.bufnr .. '@simpleline#TablineClick@' .. label .. '%X'
+            \ : label
 
       is_first = false
       prev_is_active = is_cur
@@ -1058,7 +1175,10 @@ export def Tabline(): string
       var mod_mark = (show_mod && get(b, 'changed', 0) == 1) ? ' +' : ''
       var name_part = grp_item .. name .. mod_mark .. '%#None#'
 
-      s ..= key_part .. name_part
+      var label = key_part .. name_part
+      s ..= clickable
+            \ ? '%' .. b.bufnr .. '@simpleline#TablineClick@' .. label .. '%X'
+            \ : label
 
       first = false
       prev_is_cur = is_cur
@@ -1075,7 +1195,7 @@ enddef
 
 # ----------- Pick mode -----------
 def InitPickChars()
-  var chars_str = get(g:, 'simpletabline_pick_chars', 'asdfghjklqwertyuiopzxcvbnm')
+  var chars_str = get(g:, 'simpletabline_pick_chars', 'asdfjkl;ghqweruiopzxcvbnm')
   if type(chars_str) != v:t_string
     chars_str = 'asdfjkl;ghqweruiopzxcvbnm'
   endif
@@ -1268,6 +1388,15 @@ def ValidGitInfo(ev: dict<any>, dir: string): bool
       return false
     endif
   endfor
+  # Additive protocol-1 fields; a pre-0.3 daemon simply omits them.
+  for field in ['conflicts', 'stash']
+    if has_key(ev, field)
+      var count = ev[field]
+      if type(count) != v:t_number || count < 0
+        return false
+      endif
+    endif
+  endfor
   return true
 enddef
 
@@ -1297,6 +1426,8 @@ def OnGitInfo(ev: dict<any>)
     added: get(ev, 'added', 0),
     modified: get(ev, 'modified', 0),
     deleted: get(ev, 'deleted', 0),
+    conflicts: get(ev, 'conflicts', 0),
+    stash: get(ev, 'stash', 0),
     ahead: get(ev, 'ahead', 0),
     behind: get(ev, 'behind', 0),
     is_git: get(ev, 'is_git', false),
@@ -1626,6 +1757,10 @@ export def Enable()
     autocmd BufEnter,BufWritePost,DirChanged,FocusGained * simpleline#RequestGitRefresh()
     autocmd ColorScheme * simpleline#ResetHighlights()
     autocmd VimResized * redrawtabline | redrawstatus
+    # Repaint the recording indicator immediately where Vim supports the events.
+    if exists('##RecordingEnter')
+      autocmd RecordingEnter,RecordingLeave * redrawstatus
+    endif
   augroup END
 
   # Event-driven refresh plus optional, bounded polling.
@@ -1742,8 +1877,10 @@ export def Health()
   echo '  daemon running: ' .. (s_running ? 'yes' : 'no')
   echo '  daemon version/protocol: ' .. (s_daemon_version ==# '' ? 'unknown' : s_daemon_version)
         \ .. '/' .. s_daemon_protocol
-  echo '  daemon ready/waiting: ' .. (s_daemon_ready ? 'yes' : 'no')
+  echo '  daemon ready/compatible/waiting: ' .. (s_daemon_ready ? 'yes' : 'no')
+        \ .. '/' .. (s_daemon_incompatible ? 'no' : 'yes')
         \ .. '/' .. len(s_daemon_waiting_dirs)
+  echo '  diagnostics provider: ' .. DiagProviderName()
   echo '  git cache/pending: ' .. len(s_git_cache) .. '/' .. len(s_git_pending)
   echo '  separator: ' .. SeparatorStyle()
   if s_last_error !=# ''

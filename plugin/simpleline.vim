@@ -4,7 +4,7 @@ if exists('g:loaded_simpleline')
   finish
 endif
 g:loaded_simpleline = 1
-g:simpleline_version = '0.2.0'
+g:simpleline_version = '0.3.0'
 
 def ConfigFlag(name: string, default_value: number): number
   var value = get(g:, name, default_value)
@@ -42,6 +42,9 @@ g:simpleline_show_encoding = ConfigFlag('simpleline_show_encoding', 1)
 g:simpleline_show_fileformat = ConfigFlag('simpleline_show_fileformat', 1)
 g:simpleline_show_position = ConfigFlag('simpleline_show_position', 1)
 g:simpleline_show_lsp = ConfigFlag('simpleline_show_lsp', 1)
+g:simpleline_show_search = ConfigFlag('simpleline_show_search', 1)
+g:simpleline_show_recording = ConfigFlag('simpleline_show_recording', 1)
+g:simpleline_show_diagnostics = ConfigFlag('simpleline_show_diagnostics', 1)
 g:simpleline_filetype_icons = get(g:, 'simpleline_filetype_icons', {})
 
 # =============================================================
@@ -57,6 +60,7 @@ g:simpletabline_show_indexes  = ConfigFlag('simpletabline_show_indexes', 1)
 g:simpletabline_path_mode     = get(g:, 'simpletabline_path_mode', 'abbr')
 g:simpletabline_fallback_cwd_root = ConfigFlag('simpletabline_fallback_cwd_root', 1)
 g:simpletabline_newbuf_side   = get(g:, 'simpletabline_newbuf_side', 'right')
+g:simpletabline_clickable     = ConfigFlag('simpletabline_clickable', 1)
 g:simpletabline_ellipsis      = get(g:, 'simpletabline_ellipsis', ' … ')
 
 g:simpletabline_cyan_gui   = get(g:, 'simpletabline_cyan_gui', '#00ffff')

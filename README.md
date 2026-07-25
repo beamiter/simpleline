@@ -2,15 +2,18 @@
 
 Simpleline is a responsive statusline and buffer tabline for Vim 9. It keeps rendering in Vim9script and moves Git work to a small asynchronous Rust daemon, so editing never waits for `git status`.
 
-Version 0.2 focuses on safety and lifecycle correctness: dynamic text is escaped, buffer picking does not touch user mappings, Git replies cannot cross repositories, and disabling the plugin restores the UI state that existed before it was enabled.
+Version 0.3 rounds out the daily-driving feature set: search counts, a macro-recording indicator, LSP diagnostics from coc.nvim/ALE/vim-lsp, mouse clicks on the tabline, and Git stash/conflict counts — all on the same escaped, lifecycle-safe core that 0.2 established.
 
 ## Features
 
 - Mode-aware statusline with file state, Git, optional LSP/provider text, metadata, and cursor position.
+- Search count (`3/14`) while highlighting is active, and a `REC @q` macro-recording indicator.
+- Diagnostics segment (`E:n W:n`) with auto-detected providers: coc.nvim, ALE, or vim-lsp.
 - Responsive layout: narrow windows retain the branch/position and hide detailed metadata/counts.
 - Buffer-oriented tabline with relative/abbreviated paths, modified markers, visible jump indexes, overflow indicators, and keyboard picking.
+- Mouse support on the tabline: left click switches buffers, middle click deletes unmodified buffers.
 - Arrow, rounded, and plain separators; built-in Nerd Font icons with user overrides.
-- Asynchronous Git branch, ahead/behind, and added/modified/deleted counts.
+- Asynchronous Git branch, ahead/behind, added/modified/deleted counts, plus conflict (`!n`) and stash (`$n`) counts.
 - Safe enable/disable/reload lifecycle across all windows.
 - `:SimpleLineHealth` diagnostics and headless Vim/Rust regression tests.
 
@@ -19,6 +22,7 @@ Version 0.2 focuses on safety and lifecycle correctness: dynamic text is escaped
 - Vim 9.1 with `+vim9script` for the core UI.
 - Vim `+job` and `+channel`, Git, and Rust/Cargo 1.78 or newer when Git integration is enabled.
 - Vim `+timers` only when `g:simpleline_git_interval` is nonzero.
+- Git 2.15 or newer for the stash count; the daemon probes `git --version` once and skips it on older Git.
 - A Nerd Font for icons and shaped separators (optional).
 
 Simpleline is Vim9-only. Neovim does not implement Vim9script or Vim's job/channel API, so it is not supported by this plugin.
@@ -94,6 +98,9 @@ Set options before Simpleline loads. After changing a visual/runtime option, run
 | `g:simpleline_show_fileformat` | `1` | Show Unix/DOS/Mac file format. |
 | `g:simpleline_show_position` | `1` | Show line/column; the active line also shows percentage. |
 | `g:simpleline_show_lsp` | `1` | Show the compatibility provider described below. |
+| `g:simpleline_show_search` | `1` | Show `current/total` search matches while `v:hlsearch` is on. |
+| `g:simpleline_show_recording` | `1` | Show `REC @reg` while recording a macro. |
+| `g:simpleline_show_diagnostics` | `1` | Show error/warning counts from coc.nvim, ALE, or vim-lsp. |
 | `g:simpleline_filetype_icons` | `{}` | Dictionary merged over built-in icons. |
 | `g:simpleline_debug` | `0` | Emit daemon/client errors through `:messages`. |
 | `g:simpleline_enable_default_mappings` | `1` | Add historical mappings only when their keys are unused. |
@@ -113,7 +120,7 @@ let g:simpleline_filetype_icons = {'python': 'Py', 'text': ''}
 | `g:simpleline_git_show_status` | `1` | Show added/modified/deleted counts. |
 | `g:simpleline_daemon_path` | `''` | Executable override; otherwise search `runtimepath/lib`. |
 
-Refreshes are also triggered by buffer entry/write, directory changes, and focus changes. The client keeps one in-flight request per directory. The daemon runs one porcelain-v2 Git command per refresh, limits concurrency to four, and times out a query after five seconds.
+Refreshes are also triggered by buffer entry/write, directory changes, and focus changes. The client keeps one in-flight request per directory. The daemon runs one porcelain-v2 Git command per refresh, limits concurrency to four, and times out a query after five seconds. Unmerged files render as `!n` and stashes as `$n`; both stay out of the added/modified/deleted bracket.
 
 ### Buffer tabline
 
@@ -126,6 +133,7 @@ Refreshes are also triggered by buffer entry/write, directory changes, and focus
 | `g:simpletabline_path_mode` | `'abbr'` | `'tail'`, `'rel'`, `'abbr'`, or `'abs'`; relative modes use the basename outside the root. |
 | `g:simpletabline_fallback_cwd_root` | `1` | Use cwd when `simpletree` has no root. |
 | `g:simpletabline_newbuf_side` | `'right'` | Sort newer buffer numbers right (`'left'` reverses them). |
+| `g:simpletabline_clickable` | `1` | Left click switches buffers; middle click deletes unmodified buffers. |
 | `g:simpletabline_pick_chars` | home-row-first alphabet | Keys consumed by picker mode. Duplicates are ignored. |
 | `g:simpletabline_item_sep` | `' \| '` | Separator for plain mode. |
 | `g:simpletabline_key_sep` | two spaces | Gap after indexes in plain mode. |
@@ -175,3 +183,5 @@ make check
 This runs Rust formatting, Clippy with warnings denied, all Rust tests, and the headless Vim suite. Individual targets are `make rust-test` and `make vim-test`.
 
 The daemon protocol is newline-delimited JSON. Vim first sends `{"type":"version","id":0}` and expects `{"type":"version","id":0,"version":"…","protocol":1}`. It then sends `{"type":"git_info","id":N,"path":"…"}` and receives a `git_info` event carrying the same `id` and path, or an `error` event. Request IDs are the source of truth for asynchronous cache placement. Paths are limited to 4096 UTF-8 bytes; an encoded request line is limited to 25,600 bytes.
+
+Protocol 1 gained two additive `git_info` fields in 0.3: `conflicts` (unmerged entries) and `stash` (stash count). Either side may be older: Vim treats missing fields as zero, and unknown fields are ignored.

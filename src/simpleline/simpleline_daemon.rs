@@ -5,7 +5,7 @@ use std::{
     time::Duration,
 };
 use tokio::io::{self, AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
-use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+use tokio::sync::{OnceCell, OwnedSemaphorePermit, Semaphore};
 use tokio::task::{JoinError, JoinSet};
 
 const GIT_TIMEOUT: Duration = Duration::from_secs(5);
@@ -53,6 +53,8 @@ enum Event {
         added: u32,
         modified: u32,
         deleted: u32,
+        conflicts: u32,
+        stash: u32,
         ahead: u32,
         behind: u32,
         is_git: bool,
@@ -88,6 +90,8 @@ struct GitStatus {
     added: u32,
     modified: u32,
     deleted: u32,
+    conflicts: u32,
+    stash: u32,
     ahead: u32,
     behind: u32,
     is_git: bool,
@@ -118,10 +122,11 @@ fn count_ordinary_change(status: &mut GitStatus, xy: &str) {
     status.dirty = true;
 }
 
-/// Parse one `git status --porcelain=v2 --branch` response.
+/// Parse one `git status --porcelain=v2 --branch [--show-stash]` response.
 ///
-/// Rename/copy and unmerged records are counted as modified because each record
-/// represents one logical worktree entry, while untracked entries are added.
+/// Rename/copy records are counted as modified because each record represents
+/// one logical worktree entry, untracked entries are added, and unmerged
+/// records are reported separately as conflicts.
 fn parse_git_status(stdout: &str, is_git: bool) -> GitStatus {
     if !is_git {
         return GitStatus::default();
@@ -149,12 +154,19 @@ fn parse_git_status(stdout: &str, is_git: bool) -> GitStatus {
             status.behind = parse_ab_count(counts.next(), '-');
             continue;
         }
+        if let Some(value) = line.strip_prefix("# stash ") {
+            status.stash = value.trim().parse().unwrap_or(0);
+            continue;
+        }
 
         if let Some(record) = line.strip_prefix("1 ") {
             let xy = record.split_ascii_whitespace().next().unwrap_or_default();
             count_ordinary_change(&mut status, xy);
-        } else if line.starts_with("2 ") || line.starts_with("u ") {
+        } else if line.starts_with("2 ") {
             status.modified = status.modified.saturating_add(1);
+            status.dirty = true;
+        } else if line.starts_with("u ") {
+            status.conflicts = status.conflicts.saturating_add(1);
             status.dirty = true;
         } else if line.starts_with("? ") {
             status.added = status.added.saturating_add(1);
@@ -183,7 +195,7 @@ fn command_dir(path: &str) -> PathBuf {
     }
 }
 
-fn git_status_command(path: &str) -> tokio::process::Command {
+fn git_status_command(path: &str, show_stash: bool) -> tokio::process::Command {
     let mut command = tokio::process::Command::new("git");
     command
         .args([
@@ -195,14 +207,48 @@ fn git_status_command(path: &str) -> tokio::process::Command {
         .current_dir(command_dir(path))
         .env("GIT_OPTIONAL_LOCKS", "0")
         .kill_on_drop(true);
+    if show_stash {
+        command.arg("--show-stash");
+    }
     for variable in GIT_REPOSITORY_ENV_VARS {
         command.env_remove(variable);
     }
     command
 }
 
+/// `--show-stash` first appeared in Git 2.15. An unknown flag makes the whole
+/// status query fail, so the flag is enabled only after a version probe. On any
+/// probe failure a modern Git is assumed.
+fn git_version_supports_show_stash(version_text: &str) -> bool {
+    let mut numbers = version_text
+        .split(|ch: char| !ch.is_ascii_digit())
+        .filter(|part| !part.is_empty())
+        .map(|part| part.parse::<u32>().unwrap_or(0));
+    match (numbers.next(), numbers.next()) {
+        (Some(major), Some(minor)) => (major, minor) >= (2, 15),
+        _ => true,
+    }
+}
+
+static SHOW_STASH_SUPPORTED: OnceCell<bool> = OnceCell::const_new();
+
+async fn show_stash_supported() -> bool {
+    *SHOW_STASH_SUPPORTED
+        .get_or_init(|| async {
+            let mut command = tokio::process::Command::new("git");
+            command.arg("--version").kill_on_drop(true);
+            match tokio::time::timeout(GIT_TIMEOUT, command.output()).await {
+                Ok(Ok(output)) if output.status.success() => {
+                    git_version_supports_show_stash(&String::from_utf8_lossy(&output.stdout))
+                }
+                _ => true,
+            }
+        })
+        .await
+}
+
 async fn query_git_status(path: &str) -> Result<GitStatus, String> {
-    let mut command = git_status_command(path);
+    let mut command = git_status_command(path, show_stash_supported().await);
     let output = tokio::time::timeout(GIT_TIMEOUT, command.output())
         .await
         .map_err(|_| format!("git status timed out after 5 seconds for {path}"))?
@@ -231,6 +277,8 @@ async fn handle_git_info(id: u64, path: String, tx: EventTx, _permit: OwnedSemap
                     added: status.added,
                     modified: status.modified,
                     deleted: status.deleted,
+                    conflicts: status.conflicts,
+                    stash: status.stash,
                     ahead: status.ahead,
                     behind: status.behind,
                     is_git: status.is_git,
@@ -421,9 +469,9 @@ async fn main() -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        git_status_command, parse_git_status, read_request_line, run, validate_request_path, Event,
-        GitStatus, Request, GIT_REPOSITORY_ENV_VARS, MAX_REQUEST_LINE_BYTES,
-        MAX_REQUEST_PATH_BYTES, PROTOCOL_VERSION,
+        git_status_command, git_version_supports_show_stash, parse_git_status, read_request_line,
+        run, validate_request_path, Event, GitStatus, Request, GIT_REPOSITORY_ENV_VARS,
+        MAX_REQUEST_LINE_BYTES, MAX_REQUEST_PATH_BYTES, PROTOCOL_VERSION,
     };
     use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader};
 
@@ -447,6 +495,8 @@ mod tests {
                 added: 1,
                 modified: 1,
                 deleted: 1,
+                conflicts: 0,
+                stash: 0,
                 ahead: 0,
                 behind: 0,
                 is_git: true,
@@ -495,7 +545,7 @@ mod tests {
     }
 
     #[test]
-    fn counts_conflict_as_modified() {
+    fn counts_conflict_separately_from_modified() {
         let output = "\
 # branch.oid 0123456789abcdef0123456789abcdef01234567
 # branch.head main
@@ -503,8 +553,33 @@ u UU N... 100644 100644 100644 100644 1111111 2222222 3333333 conflict.txt
 ";
 
         let status = parse_git_status(output, true);
-        assert_eq!(status.modified, 1);
+        assert_eq!(status.conflicts, 1);
+        assert_eq!(status.modified, 0);
         assert!(status.dirty);
+    }
+
+    #[test]
+    fn parses_stash_header() {
+        let output = "\
+# branch.oid 0123456789abcdef0123456789abcdef01234567
+# branch.head main
+# stash 3
+";
+
+        let status = parse_git_status(output, true);
+        assert_eq!(status.stash, 3);
+        assert!(!status.dirty);
+    }
+
+    #[test]
+    fn detects_show_stash_support_from_git_version() {
+        assert!(git_version_supports_show_stash("git version 2.15.0"));
+        assert!(git_version_supports_show_stash("git version 2.43.5"));
+        assert!(git_version_supports_show_stash("git version 3.0.0"));
+        assert!(!git_version_supports_show_stash("git version 2.14.9"));
+        assert!(!git_version_supports_show_stash("git version 1.9.1"));
+        // Unparseable output assumes a modern Git.
+        assert!(git_version_supports_show_stash("who knows"));
     }
 
     #[test]
@@ -553,6 +628,8 @@ u UU N... 100644 100644 100644 100644 1111111 2222222 3333333 conflict.txt
             added: 0,
             modified: 0,
             deleted: 0,
+            conflicts: 2,
+            stash: 1,
             ahead: 0,
             behind: 0,
             is_git: true,
@@ -562,6 +639,8 @@ u UU N... 100644 100644 100644 100644 1111111 2222222 3333333 conflict.txt
         assert_eq!(json["type"], "git_info");
         assert_eq!(json["id"], 42);
         assert_eq!(json["path"], "/work/project");
+        assert_eq!(json["conflicts"], 2);
+        assert_eq!(json["stash"], 1);
     }
 
     #[test]
@@ -589,8 +668,22 @@ u UU N... 100644 100644 100644 100644 1111111 2222222 3333333 conflict.txt
     }
 
     #[test]
+    fn show_stash_flag_is_optional() {
+        let with_flag = git_status_command(".", true);
+        assert!(with_flag
+            .as_std()
+            .get_args()
+            .any(|arg| arg == std::ffi::OsStr::new("--show-stash")));
+        let without_flag = git_status_command(".", false);
+        assert!(!without_flag
+            .as_std()
+            .get_args()
+            .any(|arg| arg == std::ffi::OsStr::new("--show-stash")));
+    }
+
+    #[test]
     fn clears_repository_override_environment() {
-        let command = git_status_command(".");
+        let command = git_status_command(".", true);
         let environment = command.as_std().get_envs().collect::<Vec<_>>();
         for variable in GIT_REPOSITORY_ENV_VARS {
             assert!(environment

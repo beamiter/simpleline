@@ -17,6 +17,8 @@ buffer u
 set columns=50
 let s:formatted = simpleline#Tabline()
 let s:plain = substitute(s:formatted, '%#[^#]*#', '', 'g')
+let s:plain = substitute(s:plain, '%\d*@[^@]*@', '', 'g')
+let s:plain = substitute(s:plain, '%X', '', 'g')
 let s:plain = substitute(s:plain, '%=', '', 'g')
 let s:plain = substitute(s:plain, '%%', '%', 'g')
 call assert_true(strdisplaywidth(s:plain) <= &columns,
