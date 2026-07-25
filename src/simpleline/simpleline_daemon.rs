@@ -469,9 +469,9 @@ async fn main() -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        git_status_command, git_version_supports_show_stash, parse_git_status, read_request_line,
-        run, validate_request_path, Event, GitStatus, Request, GIT_REPOSITORY_ENV_VARS,
-        MAX_REQUEST_LINE_BYTES, MAX_REQUEST_PATH_BYTES, PROTOCOL_VERSION,
+        Event, GIT_REPOSITORY_ENV_VARS, GitStatus, MAX_REQUEST_LINE_BYTES, MAX_REQUEST_PATH_BYTES,
+        PROTOCOL_VERSION, Request, git_status_command, git_version_supports_show_stash,
+        parse_git_status, read_request_line, run, validate_request_path,
     };
     use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader};
 
@@ -670,15 +670,19 @@ u UU N... 100644 100644 100644 100644 1111111 2222222 3333333 conflict.txt
     #[test]
     fn show_stash_flag_is_optional() {
         let with_flag = git_status_command(".", true);
-        assert!(with_flag
-            .as_std()
-            .get_args()
-            .any(|arg| arg == std::ffi::OsStr::new("--show-stash")));
+        assert!(
+            with_flag
+                .as_std()
+                .get_args()
+                .any(|arg| arg == std::ffi::OsStr::new("--show-stash"))
+        );
         let without_flag = git_status_command(".", false);
-        assert!(!without_flag
-            .as_std()
-            .get_args()
-            .any(|arg| arg == std::ffi::OsStr::new("--show-stash")));
+        assert!(
+            !without_flag
+                .as_std()
+                .get_args()
+                .any(|arg| arg == std::ffi::OsStr::new("--show-stash"))
+        );
     }
 
     #[test]
@@ -686,9 +690,11 @@ u UU N... 100644 100644 100644 100644 1111111 2222222 3333333 conflict.txt
         let command = git_status_command(".", true);
         let environment = command.as_std().get_envs().collect::<Vec<_>>();
         for variable in GIT_REPOSITORY_ENV_VARS {
-            assert!(environment
-                .iter()
-                .any(|(key, value)| { *key == std::ffi::OsStr::new(variable) && value.is_none() }));
+            assert!(
+                environment.iter().any(|(key, value)| {
+                    *key == std::ffi::OsStr::new(variable) && value.is_none()
+                })
+            );
         }
     }
 

@@ -20,7 +20,7 @@ Version 0.3 rounds out the daily-driving feature set: search counts, a macro-rec
 ## Requirements
 
 - Vim 9.1 with `+vim9script` for the core UI.
-- Vim `+job` and `+channel`, Git, and Rust/Cargo 1.78 or newer when Git integration is enabled.
+- Vim `+job` and `+channel`, Git, and Rust/Cargo 1.85 or newer when Git integration is enabled.
 - Vim `+timers` only when `g:simpleline_git_interval` is nonzero.
 - Git 2.15 or newer for the stash count; the daemon probes `git --version` once and skips it on older Git.
 - A Nerd Font for icons and shaped separators (optional).

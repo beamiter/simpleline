@@ -16,7 +16,7 @@ INTRODUCTION                                             *simpleline-introductio
 
 Simpleline provides a Vim9script statusline and buffer-oriented tabline. The
 core UI requires Vim 9.1 with +vim9script. Git queries run in an asynchronous
-Rust daemon and additionally require +job, +channel, Git, and Rust/Cargo 1.78
+Rust daemon and additionally require +job, +channel, Git, and Rust/Cargo 1.85
 or newer for building. +timers is needed only for polling. Neovim is not
 supported.
 
