@@ -2,6 +2,11 @@
 
 ## Unreleased - 2026-08-01
 
+### 构建与 CI 修复
+
+- 修复 `doc/simpleline.txt` 中重复的 help tag(`:SimpleLineHealth`)。`helptags` 会因此报错,而 `install.sh` 在 `set -e` 下会随之失败——上一次提交把 CI 弄挂了,就是这个原因。
+- 新增 CI 的 MSRV 作业。
+
 ### 性能:tabline
 
 `tabline` 每次重绘都会被求值(等于每次光标移动),而它过去每次都要把所有 buffer
