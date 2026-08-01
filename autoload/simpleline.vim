@@ -6,9 +6,6 @@ vim9script
 
 # ----------- State -----------
 var s_enabled: bool = false
-var s_job: any = v:null
-var s_running: bool = false
-var s_job_generation: number = 0
 var s_next_id: number = 0
 var s_git_timer: number = 0
 var s_last_error: string = ''
@@ -530,10 +527,17 @@ def TreeRoot(): string
 enddef
 
 def RefreshTabRenderRoot()
-  s_tab_name_cache = {}
-  s_tab_render_root = TreeRoot()
-  if s_tab_render_root ==# '' && ConfBool('simpletabline_fallback_cwd_root', true)
-    s_tab_render_root = getcwd()
+  var root = TreeRoot()
+  if root ==# '' && ConfBool('simpletabline_fallback_cwd_root', true)
+    root = getcwd()
+  endif
+  # Only drop the cached display names when the root they were shortened
+  # against actually moved.  Clearing unconditionally made the cache dead
+  # weight — 'tabline' is re-evaluated on every redraw, so every entry was
+  # thrown away and recomputed before it could ever be reused.
+  if root !=# s_tab_render_root
+    s_tab_render_root = root
+    s_tab_name_cache = {}
   endif
 enddef
 
@@ -663,11 +667,19 @@ def RawBufDisplayName(b: dict<any>): string
 enddef
 
 def BufDisplayName(b: dict<any>): string
-  var key = string(b.bufnr)
+  # Keyed on the file name as well as the buffer number: now that entries
+  # survive across redraws, a buffer renamed with :file or :saveas has to miss
+  # rather than keep showing its old label.
+  var key = b.bufnr .. "\x01" .. get(b, 'name', '')
   if has_key(s_tab_name_cache, key)
     return s_tab_name_cache[key]
   endif
   var name = RawBufDisplayName(b)
+  if len(s_tab_name_cache) > 4096
+    # Entries for wiped buffers are never removed individually; bound the
+    # dictionary instead of letting a long session grow it without limit.
+    s_tab_name_cache = {}
+  endif
   s_tab_name_cache[key] = name
   return name
 enddef
@@ -1014,6 +1026,48 @@ export def TablineClick(minwid: number, clicks: number, button: string, mods: st
 enddef
 
 # ----------- Main tabline -----------
+# Rendered-tabline memo.  Vim re-evaluates 'tabline' on every redraw, so this
+# function runs on every cursor move, but its output only changes when the
+# buffer list, the current buffer, a modified flag, a buffer name, the window
+# width or the render root changes.  Recomputing unconditionally meant
+# measuring every buffer's label twice per redraw (ComputeVisible), which
+# reached ~2ms with 120 buffers open — visible lag while scrolling.
+var s_tabline_cache: string = ''
+var s_tabline_key: string = ''
+
+def TablineMemoKey(all: list<dict<any>>): string
+  # Everything the rendered string depends on.  Buffer filetype is deliberately
+  # absent: it drives the icon but reading it costs a getbufvar() per buffer on
+  # every redraw, so a FileType autocommand invalidates instead.
+  var parts: list<string> = [
+    string(&columns),
+    string(bufnr('%')),
+    s_tab_render_root,
+    TabConfString('simpletabline_item_sep', ' | '),
+    TabConfString('simpletabline_ellipsis', ' … '),
+    TabConfString('simpletabline_key_sep', ''),
+    SeparatorStyle(),
+    string(ConfBool('simpleline_nerdfont', true)),
+    string(ConfBool('simpletabline_show_indexes', true)),
+    string(TabConfBool('simpletabline_show_modified', true)),
+    string(TabConfBool('simpletabline_superscript_index', true)),
+    string(TabConfBool('simpletabline_clickable', true)),
+  ]
+  for b in all
+    parts->add(printf('%d:%d:%s', b.bufnr, get(b, 'changed', 0), get(b, 'name', '')))
+  endfor
+  return join(parts, "\x01")
+enddef
+
+# Force the next Tabline() to rebuild.  Anything that changes rendering
+# without changing the memo key (a highlight or option change, say) goes
+# through here.
+export def InvalidateTabline()
+  s_tabline_key = ''
+  s_tab_render_root = ''
+  s_tab_name_cache = {}
+enddef
+
 export def Tabline(): string
   if s_pick_mode
     return TablinePickMode()
@@ -1022,7 +1076,13 @@ export def Tabline(): string
   RefreshTabRenderRoot()
   var all = ListedNormalBuffers()
   if len(all) == 0
+    s_tabline_key = ''
     return ''
+  endif
+
+  var memo_key = TablineMemoKey(all)
+  if memo_key ==# s_tabline_key
+    return s_tabline_cache
   endif
 
   var sep = RenderEscape(TabConfString('simpletabline_item_sep', ' | '))
@@ -1190,6 +1250,8 @@ export def Tabline(): string
   endif
 
   s ..= '%=%#SimpleTablineFill#'
+  s_tabline_key = memo_key
+  s_tabline_cache = s
   return s
 enddef
 
@@ -1337,20 +1399,37 @@ enddef
 # Backend (daemon) management
 # =============================================================
 def FindDaemon(): string
-  var override = get(g:, 'simpleline_daemon_path', '')
-  if type(override) == v:t_string && override !=# '' && executable(override)
-    return override
+  SetupCore()
+  return simpleline#core#FindExe()
+enddef
+
+# The vendored simplecore supervisor owns the daemon process: job_status-based
+# liveness, generation-guarded callbacks, backoff restarts and a crash-loop
+# breaker.  Only the protocol handshake and git bookkeeping live here.
+var s_core_ready: bool = false
+
+def SetupCore()
+  if s_core_ready
+    return
   endif
-  var names = IsWin() ? ['lib/simpleline-daemon.exe', 'lib/simpleline-daemon']
-        \ : ['lib/simpleline-daemon']
-  for name in names
-    for p in globpath(&runtimepath, name, false, true)
-      if executable(p)
-        return p
-      endif
-    endfor
-  endfor
-  return ''
+  s_core_ready = true
+  simpleline#core#Setup({
+    name: 'SimpleLine',
+    exe: 'simpleline-daemon',
+    path_var: 'simpleline_daemon_path',
+    debug_var: 'simpleline_debug',
+    handshake: {request: {type: 'version'}, reply_type: 'version', proto_key: 'protocol'},
+    OnEvent: OnDaemonEvent,
+    OnExit: OnDaemonExit,
+  })
+enddef
+
+def OnDaemonExit(code: number, restarting: bool)
+  s_daemon_ready = false
+  s_daemon_version = ''
+  s_daemon_protocol = 0
+  s_daemon_waiting_dirs = {}
+  ClearPending()
 enddef
 
 def ClearPending()
@@ -1465,27 +1544,17 @@ def OnDaemonError(ev: dict<any>)
   endif
 enddef
 
-def OnDaemonLine(line: string)
-  if line ==# ''
-    return
-  endif
-  var ev: any
-  try
-    ev = json_decode(line)
-  catch
-    DebugLog('invalid daemon response: ' .. line)
-    return
-  endtry
-  if type(ev) != v:t_dict || !has_key(ev, 'type') || type(ev.type) != v:t_string
+def OnDaemonEvent(ev: dict<any>)
+  if !has_key(ev, 'type') || type(ev.type) != v:t_string
     DebugLog('malformed daemon response')
     return
   endif
   if ev.type ==# 'version'
-    var id = get(ev, 'id', -1)
+    # The supervisor assigned the id and already correlated this reply to its
+    # handshake request; only the payload still needs validating.
     var version = get(ev, 'version', '')
     var protocol = get(ev, 'protocol', 0)
-    if type(id) == v:t_number && id == 0 && type(version) == v:t_string
-          \ && version !=# '' && type(protocol) == v:t_number
+    if type(version) == v:t_string && version !=# '' && type(protocol) == v:t_number
       s_daemon_version = version
       s_daemon_protocol = protocol
       if protocol != 1
@@ -1513,77 +1582,20 @@ def OnDaemonLine(line: string)
 enddef
 
 def StartDaemon(): bool
-  if s_running && s_job != v:null
-    try
-      if job_status(s_job) ==# 'run'
-        return true
-      endif
-    catch
-    endtry
+  SetupCore()
+  if simpleline#core#IsRunning()
+    return true
   endif
-  var cmd = FindDaemon()
-  if cmd ==# '' || !executable(cmd)
-    DebugLog('daemon not found; run ./install.sh or set g:simpleline_daemon_path')
-    return false
-  endif
-  s_job_generation += 1
-  var generation = s_job_generation
-  try
-    s_job = job_start([cmd], {
-      in_io: 'pipe',
-      out_mode: 'nl',
-      out_cb: (ch, line) => {
-        if generation == s_job_generation
-          OnDaemonLine(line)
-        endif
-      },
-      err_mode: 'nl',
-      err_cb: (ch, line) => {
-        if generation == s_job_generation && line !=# ''
-          DebugLog('daemon stderr: ' .. line)
-        endif
-      },
-      exit_cb: (ch, code) => {
-        if generation == s_job_generation
-          s_running = false
-          s_job = v:null
-          ClearPending()
-          if code != 0
-            DebugLog('daemon exited with code ' .. code)
-          endif
-        endif
-      },
-      stoponexit: 'term'
-    })
-    s_running = s_job != v:null && job_status(s_job) ==# 'run'
-    if s_running
-      s_last_error = ''
-      s_daemon_version = ''
-      s_daemon_protocol = 0
-      s_daemon_ready = false
-      s_daemon_incompatible = false
-      s_daemon_waiting_dirs = {}
-      SendReq({type: 'version', id: 0})
-    endif
-  catch
-    s_job = v:null
-    s_running = false
-    DebugLog('failed to start daemon: ' .. v:exception)
-  endtry
-  return s_running
+  s_daemon_version = ''
+  s_daemon_protocol = 0
+  s_daemon_ready = false
+  s_daemon_incompatible = false
+  s_daemon_waiting_dirs = {}
+  return simpleline#core#Ensure()
 enddef
 
 def SendReq(req: dict<any>): bool
-  if !s_running || s_job == v:null
-    return false
-  endif
-  try
-    ch_sendraw(s_job, json_encode(req) .. "\n")
-    return true
-  catch
-    DebugLog('failed to send daemon request: ' .. v:exception)
-    return false
-  endtry
+  return simpleline#core#Send(req)
 enddef
 
 def NextId(): number
@@ -1599,7 +1611,7 @@ def RequestGitDir(dir: string)
     s_git_refresh_again[dir] = true
     return
   endif
-  if !s_running && !StartDaemon()
+  if !simpleline#core#IsRunning() && !StartDaemon()
     return
   endif
   if s_daemon_incompatible
@@ -1641,20 +1653,12 @@ def GitTimerCb(_id: number)
 enddef
 
 def StopDaemon()
-  s_job_generation += 1
-  var old_job = s_job
-  s_job = v:null
-  s_running = false
+  SetupCore()
+  simpleline#core#Stop()
   s_daemon_ready = false
   s_daemon_incompatible = false
   s_daemon_waiting_dirs = {}
   ClearPending()
-  if old_job != v:null
-    try
-      job_stop(old_job)
-    catch
-    endtry
-  endif
 enddef
 
 # =============================================================
@@ -1823,6 +1827,21 @@ export def Stop()
   StopDaemon()
 enddef
 
+export def Restart()
+  SetupCore()
+  s_daemon_ready = false
+  s_daemon_incompatible = false
+  s_daemon_waiting_dirs = {}
+  ClearPending()
+  if simpleline#core#Restart()
+    echom '[SimpleLine] daemon restarted'
+  endif
+enddef
+
+export def ShowLog()
+  simpleline#core#ShowLog()
+enddef
+
 export def RequestGitRefresh()
   RequestGitInfo()
 enddef
@@ -1873,8 +1892,11 @@ export def Health()
         \ .. '/' .. (executable('git') ? 'yes' : 'no')
   echo '  Git interval/timer: ' .. string(get(g:, 'simpleline_git_interval', 2000))
         \ .. '/' .. (s_git_timer == 0 ? 'stopped' : string(s_git_timer))
+  var h = simpleline#core#Health()
   echo '  daemon: ' .. (daemon ==# '' ? 'not found' : daemon)
-  echo '  daemon running: ' .. (s_running ? 'yes' : 'no')
+  echo '  daemon running: ' .. (h.running ? 'yes' : 'no')
+  echo '  daemon crashes/restarts: ' .. h.crashes .. '/' .. h.restarts
+        \ .. (h.breaker_open ? ' (auto-restart disabled — :SimpleLineRestart)' : '')
   echo '  daemon version/protocol: ' .. (s_daemon_version ==# '' ? 'unknown' : s_daemon_version)
         \ .. '/' .. s_daemon_protocol
   echo '  daemon ready/compatible/waiting: ' .. (s_daemon_ready ? 'yes' : 'no')

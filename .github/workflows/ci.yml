@@ -33,3 +33,9 @@ jobs:
           response="$(printf '%s\n' '{"type":"version","id":1}' | ./lib/simpleline-daemon)"
           grep -F '"type":"version"' <<<"$response"
           grep -F '"protocol":1' <<<"$response"
+
+      - name: Compile every Vim9 def (lazy compilation hides cold-branch errors)
+        run: make defcompile
+
+      - name: simplecore supervisor regression suite
+        run: make vim-core

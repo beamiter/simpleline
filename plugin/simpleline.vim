@@ -133,6 +133,8 @@ command! SimpleLine simpleline#Enable()
 command! SimpleLineDisable simpleline#Disable()
 command! SimpleLineDebug simpleline#DebugStatus()
 command! SimpleLineHealth simpleline#Health()
+command! SimpleLineRestart simpleline#Restart()
+command! SimpleLineLog simpleline#ShowLog()
 command! SimpleLineToggle simpleline#Toggle()
 command! SimpleLineReload simpleline#Reload()
 command! SimpleLineGitRefresh simpleline#RequestGitRefresh()
@@ -199,4 +201,9 @@ augroup END
 augroup SimpleTablineRefresh
   autocmd!
   autocmd User SimpleTablineRefresh redrawtabline
+  # The rendered tabline is memoized on a key built from the buffer list, the
+  # current buffer, modified flags, names and width.  These two events change
+  # the output without touching any of that — the filetype icon and the
+  # shortened display name — so they invalidate explicitly.
+  autocmd FileType,BufFilePost * call simpleline#InvalidateTabline()
 augroup END
