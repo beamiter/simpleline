@@ -45,7 +45,13 @@ jobs:
           ./install.sh
           response="$(printf '%s\n' '{"type":"version","id":1}' | ./lib/simpleline-daemon)"
           grep -F '"type":"version"' <<<"$response"
-          grep -F '"protocol":1' <<<"$response"
+          # Read the expected version from the source rather than hardcoding it;
+          # the equivalent assertion in simplegit silently drifted behind two
+          # protocol bumps before anyone noticed.
+          expected="$(sed -n 's/^const PROTOCOL_VERSION: u32 = \([0-9]*\);/\1/p' \
+            src/simpleline/simpleline_daemon.rs)"
+          test -n "$expected"
+          grep -F "\"protocol\":$expected" <<<"$response"
 
       - name: Compile every Vim9 def (lazy compilation hides cold-branch errors)
         run: make defcompile
