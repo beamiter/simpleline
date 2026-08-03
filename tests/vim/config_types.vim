@@ -12,6 +12,7 @@ let g:simpleline_nerdfont = 'invalid'
 let g:simpleline_compact_width = []
 let g:simpleline_show_position = {}
 let g:simpleline_filetype_icons = []
+let g:simpleline_custom_right = 'not-a-list'
 let g:simpleline_git_interval = {}
 let g:simpletabline_item_sep = []
 let g:simpletabline_key_sep = {}

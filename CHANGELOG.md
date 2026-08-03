@@ -2,6 +2,16 @@
 
 ## Unreleased - 2026-08-01
 
+### 新增:用户自定义段位
+
+- `g:simpleline_custom_right`:在 LSP/provider 段位与文件元信息之间插入用户段位。
+  每项是 `{'fn': 函数名或 Funcref, 'hl': 高亮组, 'compact': 0/1}`,`fn` 无参数、
+  返回字符串,返回空串即隐藏。
+- 与其他动态段位一样转义,provider 无法注入 statusline 格式项;provider 抛异常
+  时跳过该段位并走 `g:simpleline_debug`,不会破坏整条 statusline。
+- 函数不存在时静默跳过,因此可以在 provider 插件加载之前就注册段位。
+- `:SimpleLineHealth` 增加一行:已注册段位数与当前实际渲染的段位数。
+
 ### 构建与 CI 修复
 
 - 修复 `doc/simpleline.txt` 中重复的 help tag(`:SimpleLineHealth`)。`helptags` 会因此报错,而 `install.sh` 在 `set -e` 下会随之失败——上一次提交把 CI 弄挂了,就是这个原因。

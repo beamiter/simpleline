@@ -119,6 +119,7 @@ g:simpleline_show_search              1 (current/total while v:hlsearch)
 g:simpleline_show_recording           1 (REC @reg while recording)
 g:simpleline_show_diagnostics         1 (E:n W:n from coc/ALE/vim-lsp)
 g:simpleline_filetype_icons           {}
+g:simpleline_custom_right             [] (user segments, see below)
 g:simpleline_debug                    0
 g:simpleline_enable_default_mappings  1
 
@@ -162,6 +163,31 @@ used when g:simpletabline_fallback_cwd_root is enabled.
 
 A non-empty g:simplecc_status string is shown as a compatibility LSP/provider
 segment. It is escaped and rendered literally.
+
+                                                  *simpleline-custom-segments*
+g:simpleline_custom_right holds user segments, rendered on the right between
+the LSP/provider segment and the file metadata: >
+
+  let g:simpleline_custom_right = [
+        \ {'fn': 'MyVimrcStatus', 'hl': 'SimpleLineDiagWarn'},
+        \ ]
+<
+Each entry is a dictionary:
+
+  fn       Function name or Funcref taking no argument and returning a
+           string.  An empty string hides the segment.  Required; an unknown
+           function name is skipped silently, so a segment may be registered
+           before its provider loads.
+  hl       Highlight group, default SimpleLineRight.  Names outside \w\+ fall
+           back to the default.
+  compact  1 (default) keeps the segment in compact windows; 0 hides it.
+
+The returned text is escaped like every other dynamic segment, so a provider
+cannot inject statusline format items.  A provider that throws is skipped and
+reported through g:simpleline_debug; it never breaks the statusline.
+Providers run on every statusline redraw, so they must be cheap — read a
+cached variable instead of shelling out.  :SimpleLineHealth reports how many
+segments are registered and how many currently render.
 
 SimpleLine* highlight groups use `:highlight default`. Define them before
 Simpleline to override the built-in palette. Tabline transitions derive from

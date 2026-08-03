@@ -102,6 +102,7 @@ Set options before Simpleline loads. After changing a visual/runtime option, run
 | `g:simpleline_show_recording` | `1` | Show `REC @reg` while recording a macro. |
 | `g:simpleline_show_diagnostics` | `1` | Show error/warning counts from coc.nvim, ALE, or vim-lsp. |
 | `g:simpleline_filetype_icons` | `{}` | Dictionary merged over built-in icons. |
+| `g:simpleline_custom_right` | `[]` | User segments on the right, see below. |
 | `g:simpleline_debug` | `0` | Emit daemon/client errors through `:messages`. |
 | `g:simpleline_enable_default_mappings` | `1` | Add historical mappings only when their keys are unused. |
 
@@ -161,6 +162,15 @@ The legacy `:BufferJump1` … `:BufferJump0` commands remain available.
 
 - If `simpletree#GetRoot()` exists, its root is used for relative tabline paths; otherwise cwd is used when enabled.
 - If `g:simplecc_status` is a non-empty string, it appears as the LSP/provider segment. Its contents are rendered as literal text.
+- `g:simpleline_custom_right` adds user segments between the LSP/provider segment and the file metadata:
+
+  ```vim
+  let g:simpleline_custom_right = [
+        \ {'fn': 'MyVimrcStatus', 'hl': 'SimpleLineDiagWarn'},
+        \ ]
+  ```
+
+  `fn` is a function name or Funcref taking no argument and returning a string; an empty return hides the segment, and an unknown function name is skipped silently so a segment can be registered before its provider loads. `hl` defaults to `SimpleLineRight`, `compact` (default `1`) controls whether the segment survives in compact windows. The text is escaped like every other dynamic segment, and a provider that throws is skipped instead of breaking the statusline. Providers run on every redraw, so they should read a cached variable rather than shell out.
 - All `SimpleLine*` status groups use `:highlight default`, so a colorscheme or vimrc can define them first. Tabline colors derive from `TabLine`, `TabLineSel`, and `TabLineFill`; the pick hint has its own default red group.
 
 ## Troubleshooting

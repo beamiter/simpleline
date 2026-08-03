@@ -256,6 +256,92 @@ def GitStr(): string
   return join(parts, ' ')
 enddef
 
+# ----------- User segments -----------
+# g:simpleline_custom_right = [{fn: 'MyStatus', hl: 'SimpleLineRight',
+#                               compact: true}]
+# `fn` is a function name or Funcref taking no argument and returning a
+# string; an empty return hides the segment.  The text is escaped like every
+# other dynamic segment, so a provider can never inject format items, and a
+# provider that throws is skipped instead of breaking the statusline.
+def DictBool(entry: dict<any>, name: string, default_val: bool): bool
+  var value = get(entry, name, default_val)
+  if type(value) == v:t_bool
+    return value
+  endif
+  if type(value) == v:t_number
+    return value != 0
+  endif
+  return default_val
+enddef
+
+def CustomSegments(): list<dict<string>>
+  var entries = get(g:, 'simpleline_custom_right', [])
+  if type(entries) != v:t_list
+    DebugLog('simpleline_custom_right must be a list')
+    return []
+  endif
+
+  var compact = IsCompact()
+  var rendered: list<dict<string>> = []
+  for entry in entries
+    if type(entry) != v:t_dict
+      DebugLog('custom segment must be a dict')
+      continue
+    endif
+    if compact && !DictBool(entry, 'compact', true)
+      continue
+    endif
+
+    var fn = get(entry, 'fn', '')
+    var Target: any = fn
+    if type(fn) == v:t_string
+      # A bare name resolves script-locally inside this Vim9 script, while
+      # user providers live in the global namespace.
+      if fn !=# '' && !exists('*' .. fn) && exists('*g:' .. fn)
+        Target = 'g:' .. fn
+      elseif fn ==# '' || !exists('*' .. fn)
+        # A provider whose plugin is not loaded is silently absent, not an
+        # error.
+        continue
+      endif
+    elseif type(fn) == v:t_func
+      # function('Name') stores only the bare name, which has the same
+      # script-local resolution problem once it is called from here.
+      var fn_name = get(fn, 'name', '')
+      if fn_name =~# '^\a\w*$'
+            \ && !exists('*' .. fn_name)
+            \ && exists('*g:' .. fn_name)
+        var fn_args = get(fn, 'args', [])
+        var fn_dict = get(fn, 'dict', {})
+        Target = empty(fn_dict)
+              \ ? function('g:' .. fn_name, fn_args)
+              \ : function('g:' .. fn_name, fn_args, fn_dict)
+      endif
+    else
+      DebugLog('custom segment fn must be a function name or Funcref')
+      continue
+    endif
+
+    var text: any
+    try
+      text = call(Target, [])
+    catch
+      DebugLog('custom segment failed: ' .. v:exception)
+      continue
+    endtry
+    if type(text) != v:t_string || text ==# ''
+      continue
+    endif
+
+    var hl = get(entry, 'hl', 'SimpleLineRight')
+    if type(hl) != v:t_string || hl !~# '^\w\+$'
+      hl = 'SimpleLineRight'
+    endif
+    rendered->add({hl: hl, text: RenderEscape(text)})
+  endfor
+  return rendered
+enddef
+
 # ----------- Extra statusline segments -----------
 def RecordingStr(): string
   if !ConfBool('simpleline_show_recording', true) || !exists('*reg_recording')
@@ -443,6 +529,11 @@ export def ActiveStatusline(): string
   if ConfBool('simpleline_show_lsp', true) && type(lsp) == v:t_string && lsp !=# ''
     s ..= '%#SimpleLineLSP# ' .. RenderEscape(lsp) .. ' '
   endif
+
+  # User-provided segments
+  for segment in CustomSegments()
+    s ..= '%#' .. segment.hl .. '# ' .. segment.text .. ' '
+  endfor
 
   # Right metadata progressively disappears in compact windows.
   var metadata: list<string> = []
@@ -1903,6 +1994,9 @@ export def Health()
         \ .. '/' .. (s_daemon_incompatible ? 'no' : 'yes')
         \ .. '/' .. len(s_daemon_waiting_dirs)
   echo '  diagnostics provider: ' .. DiagProviderName()
+  var custom = get(g:, 'simpleline_custom_right', [])
+  echo '  custom segments: ' .. len(CustomSegments()) .. ' rendering/'
+        \ .. (type(custom) == v:t_list ? len(custom) : 0) .. ' registered'
   echo '  git cache/pending: ' .. len(s_git_cache) .. '/' .. len(s_git_pending)
   echo '  separator: ' .. SeparatorStyle()
   if s_last_error !=# ''

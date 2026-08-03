@@ -59,6 +59,65 @@ let g:simpleline_show_recording = 1
 normal! q
 call assert_notmatch('REC @', simpleline#ActiveStatusline())
 
+" User segments render from a function name or a Funcref.
+function! CustomSegmentOk() abort
+  return 'UPD 3'
+endfunction
+function! CustomSegmentEmpty() abort
+  return ''
+endfunction
+function! CustomSegmentThrows() abort
+  throw 'segment exploded'
+endfunction
+function! CustomSegmentInjects() abort
+  return '%f 50%'
+endfunction
+function! CustomSegmentNumber() abort
+  return 42
+endfunction
+
+enew!
+let g:simpleline_custom_right = [{'fn': 'CustomSegmentOk'}]
+call assert_match('SimpleLineRight# UPD 3 ', simpleline#ActiveStatusline())
+let g:simpleline_custom_right = [
+      \ {'fn': 'CustomSegmentOk', 'hl': 'SimpleLineDiagWarn'}]
+call assert_match('SimpleLineDiagWarn# UPD 3 ', simpleline#ActiveStatusline())
+let g:simpleline_custom_right = [{'fn': function('CustomSegmentOk')}]
+call assert_match('UPD 3', simpleline#ActiveStatusline())
+
+" Empty text, a throwing provider, an unknown name, and malformed entries are
+" all skipped without breaking the rest of the statusline.
+for s:bad in [
+      \ [{'fn': 'CustomSegmentEmpty'}],
+      \ [{'fn': 'CustomSegmentThrows'}],
+      \ [{'fn': 'CustomSegmentNumber'}],
+      \ [{'fn': 'NoSuchSegmentProvider'}],
+      \ [{'fn': ''}], [{'fn': 42}], ['not-a-dict'], [{}],
+      \ 'not-a-list']
+  let g:simpleline_custom_right = s:bad
+  let s:line = simpleline#ActiveStatusline()
+  call assert_match('%<%f', s:line)
+  call assert_notmatch('UPD', s:line)
+endfor
+
+" Segment text can never inject statusline format items, and an invalid
+" highlight name falls back to the default group.
+let g:simpleline_custom_right = [
+      \ {'fn': 'CustomSegmentInjects', 'hl': 'Bad Group%'}]
+call assert_match('SimpleLineRight# %%f 50%% ', simpleline#ActiveStatusline())
+
+" compact:0 drops the segment in narrow windows; the default keeps it.
+let g:simpleline_compact_width = 5000
+let g:simpleline_custom_right = [{'fn': 'CustomSegmentOk', 'compact': 0}]
+call assert_notmatch('UPD 3', simpleline#ActiveStatusline())
+let g:simpleline_custom_right = [{'fn': 'CustomSegmentOk'}]
+call assert_match('UPD 3', simpleline#ActiveStatusline())
+let g:simpleline_compact_width = 80
+
+let s:health = execute('SimpleLineHealth')
+call assert_match('custom segments: 1 rendering/1 registered', s:health)
+let g:simpleline_custom_right = []
+
 " Tabline items are wrapped in click labels bound to their buffer number.
 enew!
 silent file click_current.txt
