@@ -1,21 +1,13 @@
 #!/usr/bin/env bash
+# Builds the SimpleLine daemon and installs it into lib/.
+#
+# The work is shared with the rest of the simple* suite; see install-common.sh,
+# which is vendored from .simplecore and must not be edited in place.
 set -euo pipefail
 
-root_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-cd "$root_dir"
+SIMPLECORE_BINARY="simpleline-daemon"
+SIMPLECORE_DISPLAY="SimpleLine"
+SIMPLECORE_MIN_RUST_MINOR=88
+SIMPLECORE_VERIFY="self-test"
 
-cargo build --release --locked
-mkdir -p lib
-tmp_binary="$(mktemp "$root_dir/lib/.simpleline-daemon.XXXXXX")"
-trap 'rm -f "$tmp_binary"' EXIT
-install -m 0755 target/release/simpleline-daemon "$tmp_binary"
-mv -f "$tmp_binary" lib/simpleline-daemon
-trap - EXIT
-
-if command -v vim >/dev/null 2>&1; then
-  vim -Nu NONE -n -i NONE -es -c 'helptags doc' -c 'qa!'
-else
-  echo "Warning: Vim was not found on PATH; run :helptags $root_dir/doc manually." >&2
-fi
-
-echo "Installed simpleline-daemon to $root_dir/lib/simpleline-daemon"
+source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/install-common.sh"

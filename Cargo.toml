@@ -2,7 +2,7 @@
 name = "simpleline"
 version = "0.4.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.88"
 description = "A lightweight Vim9 statusline and buffer tabline with an asynchronous Git daemon"
 repository = "https://github.com/beamiter/simpleline"
 readme = "README.md"

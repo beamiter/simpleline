@@ -461,9 +461,92 @@ where
         .map_err(|error| io::Error::other(format!("stdout writer task failed: {error}")))?
 }
 
+const USAGE: &str = "\
+Usage: simpleline-daemon [OPTION]
+
+With no arguments the daemon serves newline-delimited JSON requests on stdin
+and writes replies to stdout.  That is how the Vim plugin starts it; there is
+nothing useful to do with it interactively.
+
+Options:
+  -V, --version    print the version and exit
+  -h, --help       print this help and exit
+      --self-test  run one request through the daemon in-process and exit
+";
+
+/// Drives a real request through [`run`] over in-memory pipes.
+///
+/// The installer needs to know that the binary it just built actually works,
+/// and a version string only proves the file is not corrupt.  This exercises
+/// the parse → dispatch → reply path that every request takes.
+async fn self_test() -> Result<(), String> {
+    use tokio::io::AsyncReadExt;
+
+    let request = format!("{}\n", serde_json::json!({"id": 1, "type": "version"}));
+
+    // `run` spawns its writer task, so the sink has to be owned and 'static —
+    // a borrowed Vec will not do.  A duplex pipe gives an owned write half;
+    // run drops it on the way out, which is what ends the read below.
+    let (mut client, server) = tokio::io::duplex(64 * 1024);
+    run(request.as_bytes(), server)
+        .await
+        .map_err(|error| format!("daemon loop failed: {error}"))?;
+
+    let mut reply = String::new();
+    client
+        .read_to_string(&mut reply)
+        .await
+        .map_err(|error| format!("could not read the reply: {error}"))?;
+    let first = reply
+        .lines()
+        .next()
+        .ok_or_else(|| "daemon produced no reply".to_string())?;
+    let parsed: serde_json::Value =
+        serde_json::from_str(first).map_err(|error| format!("reply was not JSON: {error}"))?;
+
+    match parsed.get("protocol").and_then(serde_json::Value::as_u64) {
+        Some(version) if version == u64::from(PROTOCOL_VERSION) => Ok(()),
+        Some(version) => Err(format!(
+            "daemon announced protocol {version}, this build is {PROTOCOL_VERSION}"
+        )),
+        None => Err(format!("reply carried no protocol version: {first}")),
+    }
+}
+
 #[tokio::main(flavor = "multi_thread")]
-async fn main() -> io::Result<()> {
-    run(tokio::io::stdin(), tokio::io::stdout()).await
+async fn main() -> std::process::ExitCode {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    match args.first().map(String::as_str) {
+        None => match run(tokio::io::stdin(), tokio::io::stdout()).await {
+            Ok(()) => std::process::ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("simpleline-daemon: {error}");
+                std::process::ExitCode::FAILURE
+            }
+        },
+        Some("--version" | "-V") => {
+            println!("simpleline-daemon {}", env!("CARGO_PKG_VERSION"));
+            std::process::ExitCode::SUCCESS
+        }
+        Some("--help" | "-h") => {
+            println!("simpleline-daemon {}\n\n{USAGE}", env!("CARGO_PKG_VERSION"));
+            std::process::ExitCode::SUCCESS
+        }
+        Some("--self-test") => match self_test().await {
+            Ok(()) => {
+                println!("ok");
+                std::process::ExitCode::SUCCESS
+            }
+            Err(message) => {
+                eprintln!("self-test failed: {message}");
+                std::process::ExitCode::FAILURE
+            }
+        },
+        Some(other) => {
+            eprintln!("unknown argument: {other}\n\n{USAGE}");
+            std::process::ExitCode::from(2)
+        }
+    }
 }
 
 #[cfg(test)]
