@@ -121,6 +121,12 @@ g:simpleline_show_lsp                 1
 g:simpleline_show_search              1 (current/total while v:hlsearch)
 g:simpleline_show_recording           1 (REC @reg while recording)
 g:simpleline_show_diagnostics         1 (E:n W:n from coc/ALE/vim-lsp)
+g:simpleline_filename_mode            'native' (native, tail, rel, abbr, abs)
+
+The default "native" keeps Vim's %f behavior.  "rel" and "abbr" use the
+current SimpleTree root when available, otherwise the current window's cwd;
+outside-root files fall back to their basename.  Unnamed and special buffers
+keep Vim's native labels.                    *g:simpleline_filename_mode*
 g:simpleline_filetype_icons           {}
 g:simpleline_custom_left              [] (user segments, see below)
 g:simpleline_custom_right             [] (user segments, see below)

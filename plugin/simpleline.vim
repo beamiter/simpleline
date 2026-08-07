@@ -47,6 +47,10 @@ g:simpleline_show_search = ConfigFlag('simpleline_show_search', 1)
 g:simpleline_show_recording = ConfigFlag('simpleline_show_recording', 1)
 g:simpleline_show_diagnostics = ConfigFlag('simpleline_show_diagnostics', 1)
 g:simpleline_filetype_icons = get(g:, 'simpleline_filetype_icons', {})
+# Keep Vim's native %f rendering unless the user explicitly asks for a path
+# policy shared with the buffer tabline. Runtime reads validate the value too,
+# so changing it before :SimpleLineReload cannot poison the statusline.
+g:simpleline_filename_mode = get(g:, 'simpleline_filename_mode', 'native')
 
 # =============================================================
 # Tabline configuration (merged from simpletabline)

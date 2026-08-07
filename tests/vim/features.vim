@@ -158,6 +158,66 @@ call assert_match('(left/right 1/1)', s:health)
 let g:simpleline_custom_left = []
 let g:simpleline_custom_right = []
 
+" Filename display stays native by default, while explicit modes share the
+" tabline's root semantics and remain literal statusline text.
+let s:old_cwd = getcwd()
+let s:path_root = tempname() .. ' status%root'
+call mkdir(s:path_root .. '/long-directory/nested', 'p')
+execute 'lcd ' .. fnameescape(s:path_root)
+execute 'edit ' .. fnameescape(s:path_root .. '/long-directory/nested/name%file.txt')
+let g:simpleline_filename_mode = 'native'
+call assert_match('%f', simpleline#ActiveStatusline())
+let g:simpleline_filename_mode = 'tail'
+call assert_match('name%%file.txt', simpleline#ActiveStatusline())
+call assert_notmatch('long-directory', simpleline#ActiveStatusline())
+let g:simpleline_filename_mode = 'rel'
+call assert_match('long-directory/nested/name%%file.txt', simpleline#ActiveStatusline())
+call assert_match('long-directory/nested/name%%file.txt', simpleline#InactiveStatusline())
+let g:simpleline_filename_mode = 'abbr'
+call assert_match('l/n/name%%file.txt', simpleline#ActiveStatusline())
+let g:simpleline_filename_mode = 'abs'
+call assert_match('/long-directory/nested/name%%file.txt', simpleline#ActiveStatusline())
+
+" A window-local cwd is the relative root; another split must not leak it.
+let g:simpleline_filename_mode = 'rel'
+let s:path_win = win_getid()
+vsplit
+let s:other_root = tempname() .. ' other-root'
+call mkdir(s:other_root .. '/active', 'p')
+execute 'lcd ' .. fnameescape(s:other_root)
+execute 'edit ' .. fnameescape(s:other_root .. '/active/current.txt')
+call assert_match('active/current.txt', simpleline#ActiveStatusline())
+call assert_notmatch('long-directory/nested', simpleline#ActiveStatusline())
+
+" `%!InactiveStatusline()` itself runs in this active window. During a real
+" redraw Vim identifies the inactive target with g:statusline_winid; its
+" buffer and window-local cwd must drive the explicit filename.
+call assert_match('simpleline#InactiveStatusline',
+      \ gettabwinvar(1, win_id2tabwin(s:path_win)[1], '&statusline'))
+let g:statusline_winid = s:path_win
+redrawstatus
+let s:inactive_line = simpleline#InactiveStatusline()
+call assert_match('long-directory/nested/name%%file.txt', s:inactive_line)
+call assert_notmatch('active/current.txt', s:inactive_line)
+unlet g:statusline_winid
+close!
+
+" Unnamed and special buffers keep Vim's native labels, and malformed runtime
+" configuration falls back rather than throwing during a redraw.
+enew!
+let g:simpleline_filename_mode = 'rel'
+call assert_match('\[No Name\]', simpleline#ActiveStatusline())
+setlocal buftype=nofile
+silent file [SimpleLine Special]
+let g:simpleline_filename_mode = 'abs'
+call assert_match('%f', simpleline#ActiveStatusline())
+let g:simpleline_filename_mode = {}
+call assert_match('%f', simpleline#ActiveStatusline())
+let g:simpleline_filename_mode = 'native'
+execute 'lcd ' .. fnameescape(s:old_cwd)
+call delete(s:path_root, 'rf')
+call delete(s:other_root, 'rf')
+
 " Tabline items are wrapped in click labels bound to their buffer number.
 enew!
 silent file click_current.txt

@@ -349,6 +349,77 @@ def CustomSegments(config_name: string, default_hl: string): list<dict<string>>
   return rendered
 enddef
 
+# Resolve the window whose statusline Vim is evaluating. A top-level `%!`
+# expression runs in the current window, even when it is building an inactive
+# window's line; Vim exposes that real target through g:statusline_winid.
+def StatusTarget(): dict<any>
+  var configured = get(g:, 'statusline_winid', win_getid())
+  var winid = type(configured) == v:t_number ? configured : win_getid()
+  var tabwin = win_id2tabwin(winid)
+  if len(tabwin) < 2 || tabwin[0] == 0 || tabwin[1] == 0
+    winid = win_getid()
+    tabwin = win_id2tabwin(winid)
+  endif
+
+  var windows = getwininfo(winid)
+  var bn = empty(windows) ? bufnr() : get(windows[0], 'bufnr', bufnr())
+  var buffers = getbufinfo(bn)
+  var name = empty(buffers) ? bufname(bn) : get(buffers[0], 'name', '')
+  var cwd = getcwd()
+  try
+    cwd = getcwd(tabwin[1], tabwin[0])
+  catch
+    # A window can disappear between statusline invalidation and redraw. The
+    # current cwd is a safe last-resort display root for that single frame.
+  endtry
+  return {bufnr: bn, name: name, cwd: cwd}
+enddef
+
+# Return the statusline filename item. `native` deliberately stays as Vim's
+# own %f item for full backward compatibility. Explicit path modes are literal
+# text and therefore pass through RenderEscape(); unnamed and special buffers
+# keep Vim's useful built-in labels instead of becoming filesystem paths.
+def StatusFilename(): string
+  var configured = get(g:, 'simpleline_filename_mode', 'native')
+  var mode = type(configured) == v:t_string ? configured : 'native'
+  if index(['native', 'tail', 'rel', 'abbr', 'abs'], mode) < 0
+    mode = 'native'
+  endif
+  if mode ==# 'native'
+    return '%f'
+  endif
+  var target = StatusTarget()
+  if getbufvar(target.bufnr, '&buftype') !=# ''
+    return '%f'
+  endif
+  var name = target.name
+  if name ==# ''
+    return '[No Name]'
+  endif
+  if mode ==# 'tail'
+    return RenderEscape(fnamemodify(name, ':t'))
+  endif
+  # getbufinfo().name is already absolute for named file buffers. Keeping that
+  # value avoids resolving a relative name against the active window's cwd.
+  var absolute = name
+  if mode ==# 'abs'
+    return RenderEscape(absolute)
+  endif
+
+  # GetRoot() is a pure accessor over SimpleTree's already-known state; this
+  # path never queries Git or evaluates a user status provider. Without an
+  # open tree, the target window's cwd intentionally observes its local :lcd.
+  var root = TreeRoot()
+  if root ==# ''
+    root = target.cwd
+  endif
+  var relative = root ==# '' ? '' : RelToRoot(absolute, root)
+  if relative ==# ''
+    return RenderEscape(fnamemodify(name, ':t'))
+  endif
+  return RenderEscape(mode ==# 'rel' ? relative : AbbrevRelPath(relative))
+enddef
+
 # ----------- Extra statusline segments -----------
 def RecordingStr(): string
   if !ConfBool('simpleline_show_recording', true) || !exists('*reg_recording')
@@ -523,7 +594,7 @@ export def ActiveStatusline(): string
   # Middle: filename. %< marks the truncation point so a long path is shortened
   # here instead of Vim eating the mode/git segments from the left.
   s ..= '%#SimpleLineMid#'
-  s ..= ' ' .. RenderEscape(FtIcon()) .. '%<%f'
+  s ..= ' ' .. RenderEscape(FtIcon()) .. '%<' .. StatusFilename()
   s ..= '%( %m%r%)'
 
   # Separator to background
@@ -575,7 +646,7 @@ export def ActiveStatusline(): string
 enddef
 
 export def InactiveStatusline(): string
-  var value = '%#SimpleLineInactive# %<%f%( %m%r%) %='
+  var value = '%#SimpleLineInactive# %<' .. StatusFilename() .. '%( %m%r%) %='
   if ConfBool('simpleline_show_position', true)
     value ..= ' %l:%c '
   endif

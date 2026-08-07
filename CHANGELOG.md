@@ -33,6 +33,11 @@
 
 ### 本插件
 
+- 新增 `g:simpleline_filename_mode`:状态栏文件名可选 `native`、`tail`、
+  `rel`、`abbr`、`abs`。默认 `native` 保持旧行为；相对模式尊重 SimpleTree
+  当前 root 或 window-local cwd，所有显式路径都经过 statusline 转义，且不会
+  触发 Git 刷新或额外执行自定义 provider。
+
 - `--version`/`--help`/`--self-test`:此前 daemon 完全忽略命令行参数。
   `--self-test` 用内存管道把一条真实请求走完 parse → dispatch → reply。
 - Git 段现在显示进行中的 `REBASE` / `MERGE` / `CHERRY-PICK` / `REVERT` /

@@ -101,6 +101,7 @@ Set options before Simpleline loads. After changing a visual/runtime option, run
 | `g:simpleline_show_search` | `1` | Show `current/total` search matches while `v:hlsearch` is on. |
 | `g:simpleline_show_recording` | `1` | Show `REC @reg` while recording a macro. |
 | `g:simpleline_show_diagnostics` | `1` | Show error/warning counts from coc.nvim, ALE, or vim-lsp. |
+| `g:simpleline_filename_mode` | `'native'` | Statusline filename: `'native'`, `'tail'`, `'rel'`, `'abbr'`, or `'abs'`. |
 | `g:simpleline_filetype_icons` | `{}` | Dictionary merged over built-in icons. |
 | `g:simpleline_custom_left` | `[]` | User segments before the filename, see below. |
 | `g:simpleline_custom_right` | `[]` | User segments on the right, see below. |
@@ -163,6 +164,11 @@ The legacy `:BufferJump1` … `:BufferJump0` commands remain available.
 ## Integrations and themes
 
 - If `simpletree#GetRoot()` exists, its root is used for relative tabline paths; otherwise cwd is used when enabled.
+- `g:simpleline_filename_mode` leaves Vim's `%f` behavior untouched by default.
+  The explicit `rel` and `abbr` modes use SimpleTree's current root when one is
+  already available, otherwise the current window's cwd (including `:lcd`);
+  files outside that root fall back to their basename. Unnamed and special
+  buffers retain Vim's native labels.
 - If `g:simplecc_status` is a non-empty string, it appears as the LSP/provider segment. Its contents are rendered as literal text.
 - `g:simpleline_custom_left` adds user segments after Git/diagnostics and before
   the filename; `g:simpleline_custom_right` places them between the LSP/provider
