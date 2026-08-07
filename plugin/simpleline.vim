@@ -27,6 +27,7 @@ g:simpleline_statusline = ConfigFlag('simpleline_statusline', 1)
 g:simpleline_tabline = ConfigFlag('simpleline_tabline', 1)
 g:simpleline_git_enabled = ConfigFlag('simpleline_git_enabled', 1)
 g:simpleline_git_show_status = ConfigFlag('simpleline_git_show_status', 1)
+g:simpleline_git_show_operation = ConfigFlag('simpleline_git_show_operation', 1)
 g:simpleline_enable_default_mappings = ConfigFlag('simpleline_enable_default_mappings', 1)
 
 # Separator style: 'arrow' (powerline), 'round', 'plain'

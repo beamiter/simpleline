@@ -35,6 +35,12 @@
 
 - `--version`/`--help`/`--self-test`:此前 daemon 完全忽略命令行参数。
   `--self-test` 用内存管道把一条真实请求走完 parse → dispatch → reply。
+- Git 段现在显示进行中的 `REBASE` / `MERGE` / `CHERRY-PICK` / `REVERT` /
+  `BISECT` / `AM`,紧凑窗口也不会隐藏;检测直接读取 gitdir 的状态文件,不会给
+  每次刷新再加一个 Git 进程。`g:simpleline_git_show_operation` 可关闭。
+- operation 探测会先解析实际工作目录 symlink,与 `git status` 的 current-dir 语义一致;
+  不会再错读 symlink 词法父目录中另一个仓库的 merge/rebase 状态。物理路径无法
+  解析时宁可省略 operation,也不回退到可能无关的词法父仓库。
 
 ### 新增:用户自定义段位
 

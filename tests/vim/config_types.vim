@@ -7,6 +7,7 @@ execute 'set runtimepath^=' . fnameescape(s:root)
 let g:simpleline_auto_enable = {}
 let g:simpleline_enable_default_mappings = []
 let g:simpleline_git_enabled = {}
+let g:simpleline_git_show_operation = []
 let g:simpleline_separator = {}
 let g:simpleline_nerdfont = 'invalid'
 let g:simpleline_compact_width = []
@@ -26,6 +27,7 @@ runtime plugin/simpleline.vim
 call assert_equal(1, g:simpleline_auto_enable)
 call assert_equal(1, g:simpleline_enable_default_mappings)
 call assert_equal(1, g:simpleline_git_enabled)
+call assert_equal(1, g:simpleline_git_show_operation)
 
 " Keep this smoke test independent of an installed daemon, then exercise the
 " actual VimEnter/Toggle/Reload/Stop lifecycle with the normalized settings.

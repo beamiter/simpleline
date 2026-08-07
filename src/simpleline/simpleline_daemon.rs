@@ -55,6 +55,7 @@ enum Event {
         deleted: u32,
         conflicts: u32,
         stash: u32,
+        operation: String,
         ahead: u32,
         behind: u32,
         is_git: bool,
@@ -92,6 +93,7 @@ struct GitStatus {
     deleted: u32,
     conflicts: u32,
     stash: u32,
+    operation: String,
     ahead: u32,
     behind: u32,
     is_git: bool,
@@ -195,6 +197,83 @@ fn command_dir(path: &str) -> PathBuf {
     }
 }
 
+/// Find the worktree-specific Git directory without spawning another Git
+/// process. Normal repositories use a `.git/` directory; linked worktrees and
+/// submodules use a `gitdir: ...` marker file instead.
+fn discover_git_dir(path: &str) -> Option<PathBuf> {
+    let start = command_dir(path);
+    let start = if start.is_absolute() {
+        start
+    } else {
+        std::env::current_dir().ok()?.join(start)
+    };
+    // `git -C`/current_dir follows directory symlinks. Walk the same physical
+    // path here; lexical ancestors can otherwise pick an outer repository's
+    // operation sentinel while `git status` reports the symlink target repo.
+    // If the physical path cannot be resolved, omitting the operation is safer
+    // than falling back to lexical ancestors: those ancestors may belong to a
+    // different repository than the directory Git attempted to enter.
+    let start = std::fs::canonicalize(&start).ok()?;
+    for dir in start.ancestors() {
+        let marker = dir.join(".git");
+        if marker.is_dir() {
+            return Some(marker);
+        }
+        if marker.is_file() {
+            let contents = std::fs::read_to_string(&marker).ok()?;
+            let location = contents.trim().strip_prefix("gitdir:")?.trim();
+            let location = PathBuf::from(location);
+            return Some(if location.is_absolute() {
+                location
+            } else {
+                dir.join(location)
+            });
+        }
+    }
+    None
+}
+
+/// Repository operations are represented by tiny sentinel files/directories
+/// inside the Git directory. Reading them keeps the regular refresh at the
+/// existing single `git status` process.
+fn detect_git_operation(git_dir: &Path) -> String {
+    let rebase_apply = git_dir.join("rebase-apply");
+    if git_dir.join("rebase-merge").is_dir() {
+        return "REBASE".to_string();
+    }
+    if rebase_apply.is_dir() {
+        return if rebase_apply.join("applying").exists() {
+            "AM".to_string()
+        } else {
+            "REBASE".to_string()
+        };
+    }
+    if git_dir.join("MERGE_HEAD").is_file() {
+        return "MERGE".to_string();
+    }
+    if git_dir.join("CHERRY_PICK_HEAD").is_file() {
+        return "CHERRY-PICK".to_string();
+    }
+    if git_dir.join("REVERT_HEAD").is_file() {
+        return "REVERT".to_string();
+    }
+    if git_dir.join("BISECT_LOG").is_file() {
+        return "BISECT".to_string();
+    }
+    // A multi-commit cherry-pick/revert can be between commits, when the HEAD
+    // sentinel is absent but the sequencer still owns more work.
+    if let Ok(todo) = std::fs::read_to_string(git_dir.join("sequencer/todo"))
+        && let Some(action) = todo.split_ascii_whitespace().next()
+    {
+        return match action {
+            "pick" => "CHERRY-PICK".to_string(),
+            "revert" => "REVERT".to_string(),
+            _ => String::new(),
+        };
+    }
+    String::new()
+}
+
 fn git_status_command(path: &str, show_stash: bool) -> tokio::process::Command {
     let mut command = tokio::process::Command::new("git");
     command
@@ -258,10 +337,11 @@ async fn query_git_status(path: &str) -> Result<GitStatus, String> {
         return Ok(GitStatus::default());
     }
 
-    Ok(parse_git_status(
-        &String::from_utf8_lossy(&output.stdout),
-        true,
-    ))
+    let mut status = parse_git_status(&String::from_utf8_lossy(&output.stdout), true);
+    if let Some(git_dir) = discover_git_dir(path) {
+        status.operation = detect_git_operation(&git_dir);
+    }
+    Ok(status)
 }
 
 async fn handle_git_info(id: u64, path: String, tx: EventTx, _permit: OwnedSemaphorePermit) {
@@ -279,6 +359,7 @@ async fn handle_git_info(id: u64, path: String, tx: EventTx, _permit: OwnedSemap
                     deleted: status.deleted,
                     conflicts: status.conflicts,
                     stash: status.stash,
+                    operation: status.operation,
                     ahead: status.ahead,
                     behind: status.behind,
                     is_git: status.is_git,
@@ -553,8 +634,9 @@ async fn main() -> std::process::ExitCode {
 mod tests {
     use super::{
         Event, GIT_REPOSITORY_ENV_VARS, GitStatus, MAX_REQUEST_LINE_BYTES, MAX_REQUEST_PATH_BYTES,
-        PROTOCOL_VERSION, Request, git_status_command, git_version_supports_show_stash,
-        parse_git_status, read_request_line, run, validate_request_path,
+        PROTOCOL_VERSION, Request, detect_git_operation, discover_git_dir, git_status_command,
+        git_version_supports_show_stash, parse_git_status, read_request_line, run,
+        validate_request_path,
     };
     use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader};
 
@@ -580,6 +662,7 @@ mod tests {
                 deleted: 1,
                 conflicts: 0,
                 stash: 0,
+                operation: String::new(),
                 ahead: 0,
                 behind: 0,
                 is_git: true,
@@ -702,6 +785,98 @@ u UU N... 100644 100644 100644 100644 1111111 2222222 3333333 conflict.txt
     }
 
     #[test]
+    fn discovers_linked_git_dirs_and_repository_operations() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "simpleline-operation-{}-{unique}",
+            std::process::id()
+        ));
+        let worktree = root.join("worktree");
+        let nested = worktree.join("src/nested");
+        let git_dir = root.join("metadata");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::create_dir_all(&git_dir).unwrap();
+        std::fs::write(worktree.join(".git"), "gitdir: ../metadata\n").unwrap();
+
+        let discovered = discover_git_dir(nested.to_str().unwrap()).unwrap();
+        assert_eq!(
+            std::fs::canonicalize(discovered).unwrap(),
+            std::fs::canonicalize(&git_dir).unwrap()
+        );
+
+        std::fs::create_dir(git_dir.join("rebase-merge")).unwrap();
+        assert_eq!(detect_git_operation(&git_dir), "REBASE");
+        std::fs::remove_dir(git_dir.join("rebase-merge")).unwrap();
+
+        std::fs::create_dir_all(git_dir.join("rebase-apply")).unwrap();
+        std::fs::write(git_dir.join("rebase-apply/applying"), "").unwrap();
+        assert_eq!(detect_git_operation(&git_dir), "AM");
+        std::fs::remove_dir_all(git_dir.join("rebase-apply")).unwrap();
+
+        for (sentinel, expected) in [
+            ("MERGE_HEAD", "MERGE"),
+            ("CHERRY_PICK_HEAD", "CHERRY-PICK"),
+            ("REVERT_HEAD", "REVERT"),
+            ("BISECT_LOG", "BISECT"),
+        ] {
+            let path = git_dir.join(sentinel);
+            std::fs::write(&path, "state").unwrap();
+            assert_eq!(detect_git_operation(&git_dir), expected);
+            std::fs::remove_file(path).unwrap();
+        }
+
+        std::fs::create_dir(git_dir.join("sequencer")).unwrap();
+        std::fs::write(git_dir.join("sequencer/todo"), "pick deadbeef subject\n").unwrap();
+        assert_eq!(detect_git_operation(&git_dir), "CHERRY-PICK");
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn operation_discovery_follows_the_status_workdir_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "simpleline-operation-symlink-{}-{unique}",
+            std::process::id()
+        ));
+        let outer = root.join("outer");
+        let target = root.join("target-worktree");
+        std::fs::create_dir_all(outer.join(".git")).unwrap();
+        std::fs::create_dir_all(target.join(".git")).unwrap();
+        std::fs::create_dir_all(target.join("src")).unwrap();
+        std::fs::write(outer.join(".git/MERGE_HEAD"), "outer").unwrap();
+        std::fs::write(target.join(".git/CHERRY_PICK_HEAD"), "target").unwrap();
+        symlink(&target, outer.join("linked")).unwrap();
+
+        let discovered = discover_git_dir(outer.join("linked/src").to_str().unwrap()).unwrap();
+        assert_eq!(
+            std::fs::canonicalize(&discovered).unwrap(),
+            std::fs::canonicalize(target.join(".git")).unwrap()
+        );
+        assert_eq!(detect_git_operation(&discovered), "CHERRY-PICK");
+
+        // Never fall back to the lexical outer repository when the symlink's
+        // physical target cannot be resolved. Git cannot enter this directory,
+        // so reporting the outer MERGE would be actively misleading.
+        symlink(root.join("missing-target"), outer.join("dangling")).unwrap();
+        assert_eq!(
+            discover_git_dir(outer.join("dangling/src").to_str().unwrap()),
+            None
+        );
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn git_info_event_serializes_request_path() {
         let json = serde_json::to_value(Event::GitInfo {
             id: 42,
@@ -713,6 +888,7 @@ u UU N... 100644 100644 100644 100644 1111111 2222222 3333333 conflict.txt
             deleted: 0,
             conflicts: 2,
             stash: 1,
+            operation: "MERGE".to_string(),
             ahead: 0,
             behind: 0,
             is_git: true,
@@ -724,6 +900,7 @@ u UU N... 100644 100644 100644 100644 1111111 2222222 3333333 conflict.txt
         assert_eq!(json["path"], "/work/project");
         assert_eq!(json["conflicts"], 2);
         assert_eq!(json["stash"], 1);
+        assert_eq!(json["operation"], "MERGE");
     }
 
     #[test]

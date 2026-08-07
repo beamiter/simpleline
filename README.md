@@ -13,7 +13,7 @@ Version 0.3 rounds out the daily-driving feature set: search counts, a macro-rec
 - Buffer-oriented tabline with relative/abbreviated paths, modified markers, visible jump indexes, overflow indicators, and keyboard picking.
 - Mouse support on the tabline: left click switches buffers, middle click deletes unmodified buffers.
 - Arrow, rounded, and plain separators; built-in Nerd Font icons with user overrides.
-- Asynchronous Git branch, ahead/behind, added/modified/deleted counts, plus conflict (`!n`) and stash (`$n`) counts.
+- Asynchronous Git branch, in-progress operation (`REBASE`, `MERGE`, `CHERRY-PICK`, `REVERT`, `BISECT`, or `AM`), ahead/behind, added/modified/deleted counts, plus conflict (`!n`) and stash (`$n`) counts.
 - Safe enable/disable/reload lifecycle across all windows.
 - `:SimpleLineHealth` diagnostics and headless Vim/Rust regression tests.
 
@@ -119,9 +119,10 @@ let g:simpleline_filetype_icons = {'python': 'Py', 'text': ''}
 | `g:simpleline_git_enabled` | `1` | Start/query the Rust daemon and show Git. |
 | `g:simpleline_git_interval` | `2000` | Poll interval in ms (minimum 250); `0` is event-only. |
 | `g:simpleline_git_show_status` | `1` | Show added/modified/deleted counts. |
+| `g:simpleline_git_show_operation` | `1` | Show an in-progress rebase/merge/cherry-pick/revert/bisect/am operation. |
 | `g:simpleline_daemon_path` | `''` | Executable override; otherwise search `runtimepath/lib`. |
 
-Refreshes are also triggered by buffer entry/write, directory changes, and focus changes. The client keeps one in-flight request per directory. The daemon runs one porcelain-v2 Git command per refresh, limits concurrency to four, and times out a query after five seconds. Unmerged files render as `!n` and stashes as `$n`; both stay out of the added/modified/deleted bracket.
+Refreshes are also triggered by buffer entry/write, directory changes, and focus changes. The client keeps one in-flight request per directory. The daemon runs one porcelain-v2 Git command per refresh, limits concurrency to four, and times out a query after five seconds. It reads Git's operation sentinel files directly, so operation detection does not add another process. Directory symlinks are resolved before walking for `.git`; if the physical path cannot be resolved, the operation is omitted rather than borrowed from a lexical parent repository. Unmerged files render as `!n` and stashes as `$n`; both stay out of the added/modified/deleted bracket. Operations and conflicts remain visible in compact windows.
 
 ### Buffer tabline
 
@@ -194,4 +195,4 @@ This runs Rust formatting, Clippy with warnings denied, all Rust tests, and the 
 
 The daemon protocol is newline-delimited JSON. Vim first sends `{"type":"version","id":0}` and expects `{"type":"version","id":0,"version":"…","protocol":1}`. It then sends `{"type":"git_info","id":N,"path":"…"}` and receives a `git_info` event carrying the same `id` and path, or an `error` event. Request IDs are the source of truth for asynchronous cache placement. Paths are limited to 4096 UTF-8 bytes; an encoded request line is limited to 25,600 bytes.
 
-Protocol 1 gained two additive `git_info` fields in 0.3: `conflicts` (unmerged entries) and `stash` (stash count). Either side may be older: Vim treats missing fields as zero, and unknown fields are ignored.
+Protocol 1 has additive `git_info` fields: `conflicts` (unmerged entries), `stash` (stash count), and `operation` (an in-progress repository operation). Either side may be older: Vim treats missing fields as zero/empty, and unknown fields are ignored.

@@ -31,6 +31,9 @@ macro, and error/warning counts from an auto-detected diagnostics provider
 clicks: left click switches to the clicked buffer, middle click deletes it
 when it has no unsaved changes.
 
+The Git segment also names an operation that needs attention — REBASE, MERGE,
+CHERRY-PICK, REVERT, BISECT, or AM — and keeps it visible in compact windows.
+
 ===============================================================================
 INSTALLATION                                         *simpleline-installation*
 
@@ -131,12 +134,17 @@ GIT ~
 g:simpleline_git_enabled              1
 g:simpleline_git_interval             2000 ms; minimum 250; 0 is event-only
 g:simpleline_git_show_status          1
+g:simpleline_git_show_operation       1 (show REBASE/MERGE/etc.)
 g:simpleline_daemon_path              '' (search runtimepath/lib)
 
 The Git segment shows the branch, ahead/behind, added/modified/deleted
 counts, conflicts as !n, and stashes as $n. Stash counting requires Git 2.15
 (--show-stash); the daemon probes `git --version` once and skips the flag on
-older installations. Compact windows keep the branch and conflicts.
+older installations. Compact windows keep the branch, operation, and
+conflicts. Operation detection reads Git's sentinel files and starts no extra
+process. Directory symlinks are resolved before repository discovery; an
+unresolvable physical path reports no operation instead of consulting a
+possibly unrelated lexical parent repository.
 
 TABLINE ~
 g:simpletabline_show_modified         1

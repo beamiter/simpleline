@@ -25,6 +25,7 @@ let s:payload = json_encode({
       \ 'deleted': 3,
       \ 'conflicts': 7,
       \ 'stash': 6,
+      \ 'operation': 'REBASE',
       \ 'ahead': 4,
       \ 'behind': 5,
       \ 'is_git': v:true,
@@ -58,15 +59,21 @@ call assert_match('-5', s:statusline)
 call assert_match('\[+1 \~2 -3\]', s:statusline)
 call assert_match('!7', s:statusline)
 call assert_match('\$6', s:statusline)
+call assert_match('REBASE', s:statusline)
 
 " Compact windows keep branch and conflicts but hide counts and stash.
 let g:simpleline_compact_width = 999
 let s:compact = simpleline#ActiveStatusline()
 call assert_match('feature/upgrade', s:compact)
 call assert_match('!7', s:compact)
+call assert_match('REBASE', s:compact)
 call assert_notmatch('\$6', s:compact)
 call assert_notmatch('\[+1', s:compact)
 let g:simpleline_compact_width = 0
+
+let g:simpleline_git_show_operation = 0
+call assert_notmatch('REBASE', simpleline#ActiveStatusline())
+let g:simpleline_git_show_operation = 1
 
 let s:health = execute('SimpleLineHealth')
 call assert_match('daemon version/protocol: test-daemon/1', s:health)

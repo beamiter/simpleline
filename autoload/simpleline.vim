@@ -218,6 +218,13 @@ def GitStr(): string
   var parts: list<string> = []
   var icon = ConfBool('simpleline_nerdfont', true) ? ' ' : ''
   parts->add(icon .. RenderEscape(branch))
+  var operation = get(info, 'operation', '')
+  if ConfBool('simpleline_git_show_operation', true)
+        \ && type(operation) == v:t_string && operation !=# ''
+    # Keep repository operations visible in compact windows: losing sight of
+    # an in-progress rebase or merge is much costlier than one short segment.
+    parts->add(RenderEscape(operation))
+  endif
   var ahead = IsCompact() ? 0 : get(info, 'ahead', 0)
   var behind = IsCompact() ? 0 : get(info, 'behind', 0)
   if ahead > 0
@@ -1567,6 +1574,11 @@ def ValidGitInfo(ev: dict<any>, dir: string): bool
       endif
     endif
   endfor
+  # Also additive: older protocol-1 daemons omit the current repository
+  # operation and the client treats it as no operation in progress.
+  if has_key(ev, 'operation') && type(ev.operation) != v:t_string
+    return false
+  endif
   return true
 enddef
 
@@ -1598,6 +1610,7 @@ def OnGitInfo(ev: dict<any>)
     deleted: get(ev, 'deleted', 0),
     conflicts: get(ev, 'conflicts', 0),
     stash: get(ev, 'stash', 0),
+    operation: get(ev, 'operation', ''),
     ahead: get(ev, 'ahead', 0),
     behind: get(ev, 'behind', 0),
     is_git: get(ev, 'is_git', false),
