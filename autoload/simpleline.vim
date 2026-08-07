@@ -264,8 +264,8 @@ def GitStr(): string
 enddef
 
 # ----------- User segments -----------
-# g:simpleline_custom_right = [{fn: 'MyStatus', hl: 'SimpleLineRight',
-#                               compact: true}]
+# g:simpleline_custom_left / g:simpleline_custom_right =
+#   [{fn: 'MyStatus', hl: 'SimpleLineRight', compact: true}]
 # `fn` is a function name or Funcref taking no argument and returning a
 # string; an empty return hides the segment.  The text is escaped like every
 # other dynamic segment, so a provider can never inject format items, and a
@@ -281,10 +281,10 @@ def DictBool(entry: dict<any>, name: string, default_val: bool): bool
   return default_val
 enddef
 
-def CustomSegments(): list<dict<string>>
-  var entries = get(g:, 'simpleline_custom_right', [])
+def CustomSegments(config_name: string, default_hl: string): list<dict<string>>
+  var entries = get(g:, config_name, [])
   if type(entries) != v:t_list
-    DebugLog('simpleline_custom_right must be a list')
+    DebugLog(config_name .. ' must be a list')
     return []
   endif
 
@@ -340,9 +340,9 @@ def CustomSegments(): list<dict<string>>
       continue
     endif
 
-    var hl = get(entry, 'hl', 'SimpleLineRight')
+    var hl = get(entry, 'hl', default_hl)
     if type(hl) != v:t_string || hl !~# '^\w\+$'
-      hl = 'SimpleLineRight'
+      hl = default_hl
     endif
     rendered->add({hl: hl, text: RenderEscape(text)})
   endfor
@@ -513,6 +513,13 @@ export def ActiveStatusline(): string
     endif
   endif
 
+  # User-provided left segments sit beside Git/diagnostics, before the
+  # filename truncation point.  This makes project/task state visible without
+  # competing with file metadata and position on the right.
+  for segment in CustomSegments('simpleline_custom_left', 'SimpleLineMid')
+    s ..= '%#' .. segment.hl .. '# ' .. segment.text .. ' '
+  endfor
+
   # Middle: filename. %< marks the truncation point so a long path is shortened
   # here instead of Vim eating the mode/git segments from the left.
   s ..= '%#SimpleLineMid#'
@@ -538,7 +545,7 @@ export def ActiveStatusline(): string
   endif
 
   # User-provided segments
-  for segment in CustomSegments()
+  for segment in CustomSegments('simpleline_custom_right', 'SimpleLineRight')
     s ..= '%#' .. segment.hl .. '# ' .. segment.text .. ' '
   endfor
 
@@ -2007,9 +2014,16 @@ export def Health()
         \ .. '/' .. (s_daemon_incompatible ? 'no' : 'yes')
         \ .. '/' .. len(s_daemon_waiting_dirs)
   echo '  diagnostics provider: ' .. DiagProviderName()
-  var custom = get(g:, 'simpleline_custom_right', [])
-  echo '  custom segments: ' .. len(CustomSegments()) .. ' rendering/'
-        \ .. (type(custom) == v:t_list ? len(custom) : 0) .. ' registered'
+  var custom_left = get(g:, 'simpleline_custom_left', [])
+  var custom_right = get(g:, 'simpleline_custom_right', [])
+  var rendered_custom = len(CustomSegments('simpleline_custom_left', 'SimpleLineMid'))
+        \ + len(CustomSegments('simpleline_custom_right', 'SimpleLineRight'))
+  var registered_custom = (type(custom_left) == v:t_list ? len(custom_left) : 0)
+        \ + (type(custom_right) == v:t_list ? len(custom_right) : 0)
+  echo '  custom segments: ' .. rendered_custom .. ' rendering/'
+        \ .. registered_custom .. ' registered (left/right '
+        \ .. (type(custom_left) == v:t_list ? len(custom_left) : 0) .. '/'
+        \ .. (type(custom_right) == v:t_list ? len(custom_right) : 0) .. ')'
   echo '  git cache/pending: ' .. len(s_git_cache) .. '/' .. len(s_git_pending)
   echo '  separator: ' .. SeparatorStyle()
   if s_last_error !=# ''

@@ -59,7 +59,7 @@ let g:simpleline_show_recording = 1
 normal! q
 call assert_notmatch('REC @', simpleline#ActiveStatusline())
 
-" User segments render from a function name or a Funcref.
+" User segments render on either side from a function name or a Funcref.
 function! CustomSegmentOk() abort
   return 'UPD 3'
 endfunction
@@ -75,8 +75,35 @@ endfunction
 function! CustomSegmentNumber() abort
   return 42
 endfunction
+function! CustomSegmentCounted() abort
+  let g:simpleline_custom_calls += 1
+  return 'COUNTED'
+endfunction
 
 enew!
+let g:simpleline_custom_left = [{'fn': 'CustomSegmentOk'}]
+let s:line = simpleline#ActiveStatusline()
+call assert_match('SimpleLineMid# UPD 3 ', s:line)
+call assert_true(stridx(s:line, 'UPD 3') < stridx(s:line, '%<%f'),
+      \ 'left custom segments render before the filename')
+let g:simpleline_custom_left = []
+
+" Left providers get the same type/exception isolation as right providers,
+" and each registered entry is evaluated only once per statusline build.
+let g:simpleline_custom_left = [{'fn': 'CustomSegmentThrows'}]
+let g:simpleline_custom_right = [{'fn': 'CustomSegmentOk'}]
+let s:line = simpleline#ActiveStatusline()
+call assert_match('UPD 3', s:line)
+call assert_match('%<%f', s:line)
+let g:simpleline_custom_left = 'not-a-list'
+call assert_match('%<%f', simpleline#ActiveStatusline())
+let g:simpleline_custom_calls = 0
+let g:simpleline_custom_left = [{'fn': 'CustomSegmentCounted'}]
+let g:simpleline_custom_right = []
+call assert_match('COUNTED', simpleline#ActiveStatusline())
+call assert_equal(1, g:simpleline_custom_calls)
+let g:simpleline_custom_left = []
+
 let g:simpleline_custom_right = [{'fn': 'CustomSegmentOk'}]
 call assert_match('SimpleLineRight# UPD 3 ', simpleline#ActiveStatusline())
 let g:simpleline_custom_right = [
@@ -116,6 +143,19 @@ let g:simpleline_compact_width = 80
 
 let s:health = execute('SimpleLineHealth')
 call assert_match('custom segments: 1 rendering/1 registered', s:health)
+call assert_match('(left/right 0/1)', s:health)
+let g:simpleline_custom_right = []
+
+" Both sides coexist and retain their declared order.
+let g:simpleline_custom_left = [{'fn': 'CustomSegmentOk'}]
+let g:simpleline_custom_right = [{'fn': 'CustomSegmentInjects'}]
+let s:line = simpleline#ActiveStatusline()
+call assert_true(stridx(s:line, 'UPD 3') < stridx(s:line, '%<%f'))
+call assert_true(stridx(s:line, '%%f 50%%') > stridx(s:line, '%='))
+let s:health = execute('SimpleLineHealth')
+call assert_match('custom segments: 2 rendering/2 registered', s:health)
+call assert_match('(left/right 1/1)', s:health)
+let g:simpleline_custom_left = []
 let g:simpleline_custom_right = []
 
 " Tabline items are wrapped in click labels bound to their buffer number.

@@ -44,6 +44,9 @@
 
 ### 新增:用户自定义段位
 
+- 新增 `g:simpleline_custom_left`,把自定义 provider 放在 Git/诊断之后、文件名
+  之前；它与原有 `g:simpleline_custom_right` 共用安全转义、异常隔离、compact
+  规则和配置格式。health 现在同时报告总数及 left/right 注册分布。
 - `g:simpleline_custom_right`:在 LSP/provider 段位与文件元信息之间插入用户段位。
   每项是 `{'fn': 函数名或 Funcref, 'hl': 高亮组, 'compact': 0/1}`,`fn` 无参数、
   返回字符串,返回空串即隐藏。
