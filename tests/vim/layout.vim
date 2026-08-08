@@ -29,6 +29,30 @@ set columns=12
 let s:tiny = simpleline#Tabline()
 call assert_match('u', s:tiny)
 
+" Under 'laststatus' = 3 Vim draws a single statusline across the whole screen,
+" so the compact threshold has to be measured against &columns.  Measuring the
+" current window instead hid half the segments on a wide global statusline as
+" soon as the user split it.
+set columns=160
+let g:simpleline_compact_width = 80
+only
+vsplit
+vsplit
+call assert_true(winwidth(0) < g:simpleline_compact_width,
+      \ 'the split windows are narrower than the compact threshold')
+
+set laststatus=2
+call assert_notmatch('&filetype', simpleline#ActiveStatusline(),
+      \ 'a narrow window still hides metadata')
+
+set laststatus=3
+call assert_match('&filetype', simpleline#ActiveStatusline(),
+      \ 'a global statusline is as wide as the screen, not as the window')
+
+set laststatus=2
+only
+unlet g:simpleline_compact_width
+
 if !empty(v:errors)
   for error in v:errors
     echomsg error

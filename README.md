@@ -92,7 +92,7 @@ Set options before Simpleline loads. After changing a visual/runtime option, run
 | `g:simpleline_tabline` | `1` | Manage the buffer tabline. |
 | `g:simpleline_separator` | `'arrow'` | `'arrow'`, `'round'`, or `'plain'`. |
 | `g:simpleline_nerdfont` | `1` | Use icons/shaped separators; `0` gives a plain fallback. |
-| `g:simpleline_compact_width` | `80` | Hide file metadata, Git counts, and ahead/behind below this width; `0` disables compact mode. |
+| `g:simpleline_compact_width` | `80` | Hide file metadata, Git counts, and ahead/behind below this width; `0` disables compact mode. Measured against `&columns` under `laststatus=3`, otherwise against the window. |
 | `g:simpleline_show_filetype` | `1` | Show filetype metadata. |
 | `g:simpleline_show_encoding` | `1` | Show file encoding. |
 | `g:simpleline_show_fileformat` | `1` | Show Unix/DOS/Mac file format. |

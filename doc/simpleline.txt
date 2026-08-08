@@ -137,7 +137,10 @@ g:simpleline_enable_default_mappings  1
 
 When statusline management is enabled, Simpleline raises 'laststatus' to 2 if
 needed and restores the old value on disable. Compact mode keeps the branch and
-position while hiding file metadata, Git counts, and ahead/behind.
+position while hiding file metadata, Git counts, and ahead/behind. Under
+'laststatus' = 3 the compact threshold is compared against &columns, because
+Vim draws a single statusline across the whole screen there; otherwise it is
+compared against the width of the window being drawn.
 
 REDRAW CACHES ~
                                                  *simpleline-redraw-caches*

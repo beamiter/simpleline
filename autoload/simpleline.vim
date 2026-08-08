@@ -122,8 +122,16 @@ def DebugLog(message: string)
 enddef
 
 def IsCompact(): bool
-  var threshold = get(g:, 'simpleline_compact_width', 80)
-  return type(threshold) == v:t_number && threshold > 0 && winwidth(0) < threshold
+  var threshold = ConfNumber('simpleline_compact_width', 80)
+  if threshold <= 0
+    return false
+  endif
+  # 'laststatus' = 3 draws one statusline across the whole screen, so the width
+  # of whichever window happens to be current says nothing about the space this
+  # line has.  Measuring the window there hid metadata, Git counts and
+  # ahead/behind on a 160-column global statusline as soon as it was split.
+  var width = &laststatus == 3 ? &columns : winwidth(0)
+  return width < threshold
 enddef
 
 # ----------- Mode display -----------
@@ -788,6 +796,7 @@ var s_char_to_bufnr: dict<number> = {}
 var s_idx_to_buf: dict<number> = {}
 var s_buf_to_idx: dict<number> = {}
 var s_tab_render_root: string = ''
+var s_tab_name_mode: string = ''
 var s_tab_name_cache: dict<string> = {}
 
 # ----------- Tabline helpers -----------
@@ -831,12 +840,16 @@ def RefreshTabRenderRoot()
   if root ==# '' && ConfBool('simpletabline_fallback_cwd_root', true)
     root = getcwd()
   endif
-  # Only drop the cached display names when the root they were shortened
-  # against actually moved.  Clearing unconditionally made the cache dead
-  # weight — 'tabline' is re-evaluated on every redraw, so every entry was
-  # thrown away and recomputed before it could ever be reused.
-  if root !=# s_tab_render_root
+  # Only drop the cached display names when something they were computed from
+  # actually moved.  Clearing unconditionally made the cache dead weight —
+  # 'tabline' is re-evaluated on every redraw, so every entry was thrown away
+  # and recomputed before it could ever be reused.  The path mode belongs here
+  # too: the cache is keyed on buffer and file name only, so without this a
+  # mode change kept returning labels shortened under the previous mode.
+  var mode = TabConfString('simpletabline_path_mode', 'abbr')
+  if root !=# s_tab_render_root || mode !=# s_tab_name_mode
     s_tab_render_root = root
+    s_tab_name_mode = mode
     s_tab_name_cache = {}
   endif
 enddef
@@ -1338,7 +1351,10 @@ var s_tabline_key: string = ''
 def TablineMemoKey(all: list<dict<any>>): string
   # Everything the rendered string depends on.  Buffer filetype is deliberately
   # absent: it drives the icon but reading it costs a getbufvar() per buffer on
-  # every redraw, so a FileType autocommand invalidates instead.
+  # every redraw, so a FileType autocommand invalidates instead.  Every other
+  # rendering input has to be listed here — an omission does not merely make a
+  # change late, it makes the option unusable at runtime, which is exactly what
+  # happened to simpletabline_path_mode and simpleline_filetype_icons.
   var parts: list<string> = [
     string(&columns),
     string(bufnr('%')),
@@ -1346,6 +1362,8 @@ def TablineMemoKey(all: list<dict<any>>): string
     TabConfString('simpletabline_item_sep', ' | '),
     TabConfString('simpletabline_ellipsis', ' … '),
     TabConfString('simpletabline_key_sep', ''),
+    TabConfString('simpletabline_path_mode', 'abbr'),
+    string(get(g:, 'simpleline_filetype_icons', {})),
     SeparatorStyle(),
     string(ConfBool('simpleline_nerdfont', true)),
     string(ConfBool('simpletabline_show_indexes', true)),
@@ -2026,6 +2044,9 @@ export def Enable()
   SetupSeparators()
   SetupHighlights()
   ResetRenderCaches()
+  # Separators and highlights have just been re-derived; a render produced
+  # under the previous ones must not survive a :SimpleLineReload.
+  InvalidateTabline()
   try
     g:SimpleTablineApplyHL()
   catch
@@ -2187,6 +2208,7 @@ export def Reload()
     SetupSeparators()
     SetupHighlights()
     ResetRenderCaches()
+    InvalidateTabline()
   endif
 enddef
 

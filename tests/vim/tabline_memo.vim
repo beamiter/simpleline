@@ -126,6 +126,34 @@ call assert_false(simpleline#Tabline() =~# '+', 'the marker is gone once disable
 unlet g:simpletabline_show_modified
 setlocal nomodified
 
+" -------------------------------------------- path mode & icon overrides ---
+
+" Both of these change what is rendered, and neither used to be in the memo
+" key — so neither could be changed at runtime at all, not even through the
+" documented ':SimpleLineReload after a visual change' remedy.
+execute 'buffer ' .. s:b
+let g:simpletabline_path_mode = 'tail'
+let s:tail = simpleline#Tabline()
+call assert_true(stridx(s:tail, s:dir) < 0, "'tail' shows no directory")
+let g:simpletabline_path_mode = 'abs'
+call assert_notequal(s:tail, simpleline#Tabline(), 'a path mode change must re-render')
+call assert_true(stridx(simpleline#Tabline(), s:dir) >= 0, "'abs' shows the directory")
+let g:simpletabline_path_mode = 'tail'
+call assert_equal(s:tail, simpleline#Tabline(), 'restoring the mode restores the render')
+unlet g:simpletabline_path_mode
+
+if get(g:, 'simpleline_nerdfont', 1)
+  setfiletype text
+  let s:before = simpleline#Tabline()
+  let g:simpleline_filetype_icons = {'text': 'TXT'}
+  call assert_notequal(s:before, simpleline#Tabline(),
+        \ 'an icon override must re-render')
+  call assert_true(simpleline#Tabline() =~# 'TXT', 'the override is used')
+  let g:simpleline_filetype_icons = {}
+  call assert_equal(s:before, simpleline#Tabline(),
+        \ 'dropping the override restores the render')
+endif
+
 " ------------------------------------------------- explicit invalidation ---
 
 let s:stable = simpleline#Tabline()

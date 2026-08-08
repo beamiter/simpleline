@@ -29,6 +29,25 @@
 - 新增 `tests/vim/render_cache.vim`:逐项验证"状态没变必须命中"与"每个输入
   变化必须未命中且值正确"。
 
+### 修复:两个"改了也没用"的渲染选项
+
+- `g:simpletabline_path_mode` 与 `g:simpleline_filetype_icons` 不在 tabline 的
+  备忘键里,`Reload()` 也不清备忘,所以这两个选项在运行时根本改不动——连文档
+  写的"改完视觉选项跑一次 `:SimpleLineReload`"都不管用。现在两者都进了备忘键;
+  另外显示名缓存只按 "buffer 号 + 文件名" 作键,所以路径模式变化时也一并清掉,
+  否则备忘重算了、名字还是旧模式下缩短的那个。
+- `Enable()` 会重新推导分隔符与高亮,现在顺手作废 tabline 备忘,旧渲染不会
+  跨过一次 `:SimpleLineReload` 活下来。
+- `tests/vim/tabline_memo.vim` 补上这两项——这正是当初漏掉它们的那个测试缺口。
+
+### 修复:`laststatus=3` 下的 compact 判定
+
+`IsCompact()` 量的是 `winwidth(0)`,但 `laststatus=3` 时 Vim 只画一条横跨整个
+屏幕的 statusline。160 列终端上两次 `:vsplit`,窗口宽约 53,于是文件类型、
+编码、换行格式、`[+n ~n -n]`、ahead/behind 和 stash 全被藏起来,而实际上还空着
+100 列。现在 `laststatus == 3` 时按 `&columns` 量。`Enable()` 只在 `laststatus`
+低于 2 时才抬高它,所以用户设的 3 会保留下来,这个状态是能走到的。
+
 ### CI:MSRV 钉住的版本与声明的版本对不上
 
 - `dtolnay/rust-toolchain` 一直钉在 1.85.0,而 `Cargo.toml` 声明的是
