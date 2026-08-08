@@ -2265,6 +2265,14 @@ enddef
 # The daemon advertises 'git-status' on the handshake, so an older binary that
 # knows nothing about per-file marks is simply never asked for them.
 def WantFileStatus(): bool
+  # The marks have exactly one consumer, the tabline.  With g:simpleline_tabline
+  # off, Enable() never touches 'tabline', so simpleline#Tabline() is never
+  # called and TablineGitMarks() never runs — asking the daemon to collect,
+  # serialize and ship up to 2000 paths on every refresh would buy a payload
+  # nobody ever reads.
+  if !ConfBool('simpleline_tabline', true)
+    return false
+  endif
   if !TabConfBool('simpletabline_git_status', true)
     return false
   endif
@@ -2582,7 +2590,11 @@ export def Health()
   echo '  git cache/pending: ' .. len(s_git_cache) .. '/' .. len(s_git_pending)
   var current = get(s_git_cache, CurrentGitDir(), {})
   var files = get(current, 'files', {})
-  echo '  git file status: ' .. (TabConfBool('simpletabline_git_status', true) ? 'on' : 'off')
+  # 'on' means "something would paint a mark", which takes both the tabline and
+  # the option: with either off the daemon is not asked, and health has to say
+  # so or "why are there no marks" has no answer.
+  echo '  git file status: ' .. (TabConfBool('simpletabline_git_status', true)
+        \ && ConfBool('simpleline_tabline', true) ? 'on' : 'off')
         \ .. '/' .. (WantFileStatus() ? 'negotiated' : 'unavailable')
         \ .. ', ' .. (type(files) == v:t_dict ? len(files) : 0) .. ' path(s)'
         \ .. (get(current, 'files_truncated', false) ? ' (truncated)' : '')

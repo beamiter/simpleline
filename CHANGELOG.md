@@ -2,6 +2,36 @@
 
 ## Unreleased - 2026-08-08
 
+### 修复:关掉 tabline,daemon 照样在收集每个文件的路径
+
+`g:simpleline_tabline = 0` 是文档里的选项:`Enable()` 不碰 `'tabline'`,于是
+`simpleline#Tabline()` 永远不会被调用,`TablineGitMarks()` 也就永远不会跑。
+但 `WantFileStatus()` 只看 `g:simpletabline_git_status`(默认 1),于是每次刷新
+的 `git_info` 请求照样带着 `want_files:true`,daemon 照样把最多 2000 条路径
+收集、序列化、发过来——一个没有任何人读的 payload。用会记账的假 daemon 复现:
+`g:simpleline_tabline = 0` 时请求里依然是
+`{"type":"git_info","want_files":true}`。
+
+- 逐文件标记只有 tabline 一个消费者,所以 tabline 关着就不再请求路径。
+  statusline 的 Git 段不受影响,分支照常查。
+- `:SimpleLineHealth` 的 `git file status:` 第一段现在同时看这两个开关:
+  前半句回答"有没有人会画标记",后半句回答"daemon 能不能给"。
+- `tests/vim/git_files.vim` 新增一节:假 daemon 把收到的每一行请求写进日志,
+  断言 tabline 关着时请求里没有 `want_files`、重新打开后又有。
+
+### 测试:"能力协商"那一节其实不会红
+
+那一节声称证明了"没有 `git-status` 能力的 daemon 从不会被要求路径",但它的假
+daemon 是用空文件表构造的:`want_files` 分支回的是 `"files":{}`,和根本不带
+路径的分支在效果上一模一样。把 `RequestGitDir()` 里的 `if WantFileStatus()`
+整个删掉,全套测试依然全绿——实测如此。
+
+现在这个 daemon 带着和有能力的那个一样的文件表(被问到就真的会答),并且把
+收到的每一行请求记进日志,于是这个门是在它真正所在的地方——线上的请求——被
+断言的。有能力的那条路径补上对称的断言:一个永远不开的门和一个永远不关的门
+一样坏。
+
+
 ### 修复:`git_provider = 'simplegit'` 依然在跑第二遍 `git status`
 
 这个选项的卖点就是"没有理由让两个 daemon 对同一个 worktree 各跑一遍

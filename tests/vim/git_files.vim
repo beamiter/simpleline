@@ -157,6 +157,28 @@ let g:simpletabline_git_status_icons = {'M': '%f 50%'}
 call assert_match('dirty.txt %%f 50%%', simpleline#Tabline())
 let g:simpletabline_git_status_icons = {}
 
+" ------------------------------------------------------ tabline disabled ---
+
+" The marks have one consumer. With no tabline nothing can paint them, so the
+" paths must not be collected, serialized and shipped on every refresh — while
+" the Git segment of the statusline keeps being answered as before.
+call writefile([], s:log)
+let g:simpleline_tabline = 0
+call simpleline#RequestGitRefresh()
+sleep 400m
+call assert_notequal([], s:GitRequests(s:log), 'the branch is still queried')
+call assert_notmatch('want_files', join(s:GitRequests(s:log), "\n"),
+      \ 'nothing renders a tabline, so no paths are asked for')
+call assert_match('main', simpleline#ActiveStatusline(), 'the branch still renders')
+call assert_match('git file status: off/unavailable', execute('SimpleLineHealth'))
+
+call writefile([], s:log)
+let g:simpleline_tabline = 1
+call simpleline#RequestGitRefresh()
+sleep 400m
+call assert_match('want_files', join(s:GitRequests(s:log), "\n"),
+      \ 'a tabline that renders again asks for the paths again')
+
 call simpleline#Stop()
 call delete(s:daemon)
 
