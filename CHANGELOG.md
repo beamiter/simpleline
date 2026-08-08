@@ -2,6 +2,29 @@
 
 ## Unreleased - 2026-08-08
 
+### 修复:`git_provider = 'simplegit'` 依然在跑第二遍 `git status`
+
+这个选项的卖点就是"没有理由让两个 daemon 对同一个 worktree 各跑一遍
+`git status`",文档也写着"完全忽略自己的 daemon"。但忽略的只是**回复**:
+`GitStr()` 在读 payload 之前就把 `info` 清空了,而 `RequestGitDir()` 从来没
+看过 provider,于是 daemon 照样被拉起来、照样每个 interval 发一次 `git_info`、
+daemon 那边照样跑一遍 `git status --porcelain=v2 --branch --show-stash`,
+结果整个丢掉。用一个会记账的假 daemon 复现:provider 为 `'simplegit'`、
+interval 250ms,1.5s 内发了 7 次请求,每次都带 `want_files:true`;
+`:SimpleLineHealth` 还说 "daemon running: yes"。选项想省掉的开销一分没省。
+
+- `'simplegit'` 现在真的不发这个请求:没人要答案就不问,daemon 连起都不起。
+- 唯一的例外是 tabline 的逐文件标记(`g:simpletabline_git_status`)——它直接
+  读 daemon 的回复,是这个 provider 下仅剩的消费者,所以它开着的时候查询照旧,
+  标记不会因为换了 provider 就没了。关掉它(或关掉 `g:simpleline_tabline`),
+  worktree 就一次都不会被扫。
+- `:SimpleLineHealth` 的 provider 行新增 `daemon query: on/off`,好回答
+  "为什么 daemon 没在跑"。
+- 文档、README 都改成说实话:`'auto'` 下 daemon 仍然要查(它是 fallback),
+  真正省掉第二遍扫描的是 `'simplegit'`。
+- 新增 `tests/vim/git_provider.vim`:假 daemon 每收到一次 `git_info` 就往日志
+  追加一行,所以"worktree 到底被扫了没有"是数出来的事实而不是从渲染串推的。
+
 ### 性能:statusline 的每帧开销
 
 `'statusline'` 是 `%!` 表达式,每次重绘都重建一遍——也就是每次光标移动。里面

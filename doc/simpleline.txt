@@ -249,6 +249,17 @@ g:simpleline_git_provider selects the source:
   'simplegit'  ignore the daemon entirely (no file counts, conflicts,
                stash or operation, since only the daemon reports those)
 
+Under 'auto' the daemon is still queried — it is the fallback, and it supplies
+everything simplegit does not report. 'simplegit' is the one that stops the
+second scan: the query is not sent, so no `git status` runs over the worktree
+and the daemon is never spawned at all. The single exception is the tabline's
+per-file marks (g:simpletabline_git_status), which read the daemon's reply
+directly and are its only remaining consumer under this provider; while they
+are on the query still runs, so the marks keep working. Turn them off — or
+turn off g:simpleline_tabline — and nothing scans the worktree twice.
+:SimpleLineHealth says which of the two it is as "daemon query: on/off" on the
+Git provider line.
+
 g:simpleline_show_hunks (default 0) adds a separate SimpleLineHunks segment
 with simplegit's added/changed/removed *lines* for the current file, for
 example `+12 ~3 -1`. It is off by default because it looks like the Git

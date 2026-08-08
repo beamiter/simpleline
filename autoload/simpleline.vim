@@ -2211,8 +2211,27 @@ def NextId(): number
   return s_next_id
 enddef
 
+# Whether anything is still left to read the daemon's answer.  With
+# g:simpleline_git_provider = 'simplegit' GitStr() discards the whole reply
+# before it looks at it, so the only remaining consumer is the tabline's
+# per-file marks.  When those are off too — or the tabline is not ours — the
+# request buys nothing at all, and sending it anyway means spawning the daemon
+# and running `git status --porcelain=v2` over the entire worktree on every
+# poll, forever, for output nobody reads.  That is precisely the cost the
+# option is chosen to avoid.
+def DaemonGitNeeded(): bool
+  if GitProvider() !=# 'simplegit'
+    return true
+  endif
+  return ConfBool('simpleline_tabline', true)
+        \ && TabConfBool('simpletabline_git_status', true)
+enddef
+
 def RequestGitDir(dir: string)
   if !s_enabled || !ConfBool('simpleline_git_enabled', true)
+    return
+  endif
+  if !DaemonGitNeeded()
     return
   endif
   if has_key(s_git_inflight, dir)
@@ -2537,7 +2556,8 @@ export def Health()
         \ .. '/' .. (s_git_timer == 0 ? 'stopped' : string(s_git_timer))
   echo '  Git provider: ' .. GitProvider() .. ' (simplegit '
         \ .. (exists('*simplegit#StatusDict') ? 'available' : 'absent')
-        \ .. ', this buffer: ' .. (empty(SimpleGitStatus()) ? 'daemon' : 'simplegit') .. ')'
+        \ .. ', this buffer: ' .. (empty(SimpleGitStatus()) ? 'daemon' : 'simplegit')
+        \ .. ', daemon query: ' .. (DaemonGitNeeded() ? 'on' : 'off') .. ')'
   var h = simpleline#core#Health()
   echo '  daemon: ' .. (daemon ==# '' ? 'not found' : daemon)
   echo '  daemon running: ' .. (h.running ? 'yes' : 'no')
