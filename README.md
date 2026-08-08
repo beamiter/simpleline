@@ -123,7 +123,8 @@ The statusline is a `%!` expression, so it is rebuilt on every redraw — every 
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `g:simpleline_git_enabled` | `1` | Start/query the Rust daemon and show Git. |
-| `g:simpleline_git_interval` | `2000` | Poll interval in ms (minimum 250); `0` is event-only. |
+| `g:simpleline_git_interval` | `2000` | Poll interval in ms (minimum 250); `0` is event-only. Directories the daemon is watching are never polled. |
+| `g:simpleline_git_watch` | `1` | Let a daemon advertising the `watch` capability report a directory's changes instead of being asked every interval. |
 | `g:simpleline_git_show_status` | `1` | Show added/modified/deleted counts. |
 | `g:simpleline_git_show_operation` | `1` | Show an in-progress rebase/merge/cherry-pick/revert/bisect/am operation. |
 | `g:simpleline_git_provider` | `'auto'` | Branch source: `'auto'` prefers simplegit and falls back to the daemon, `'daemon'` ignores simplegit, `'simplegit'` ignores the daemon. |
@@ -131,6 +132,8 @@ The statusline is a `%!` expression, so it is rebuilt on every redraw — every 
 | `g:simpleline_daemon_path` | `''` | Executable override; otherwise search `runtimepath/lib`. |
 
 Refreshes are also triggered by buffer entry/write, directory changes, focus changes, and by a daemon restart — requests orphaned by a crash, plus the current directory, are re-issued once the replacement has handshaked, so `g:simpleline_git_interval = 0` does not leave the segment showing pre-crash data. The client keeps one in-flight request per directory. The daemon runs one porcelain-v2 Git command per refresh, limits concurrency to four, and times out a query after five seconds. It reads Git's operation sentinel files directly, so operation detection does not add another process. Directory symlinks are resolved before walking for `.git`; if the physical path cannot be resolved, the operation is omitted rather than borrowed from a lexical parent repository. A `git status` that fails inside a repository is reported as an error rather than as "not a repository", so a transient failure (a concurrent `git gc`, a briefly unavailable mount, a `safe.directory` complaint) leaves the last known-good segment in place instead of blanking the branch and the in-progress operation. Unmerged files render as `!n` and stashes as `$n`; both stay out of the added/modified/deleted bracket. Operations and conflicts remain visible in compact windows.
+
+With a `watch`-capable daemon the poll is not the refresh mechanism, it is the fallback. The daemon watches the worktree recursively, coalesces bursts of filesystem events over a 200 ms quiet window (1 s hard deadline), re-runs `git status` only when something changed, and pushes an unsolicited `git_info` event; the client stops polling that directory entirely. Watching is refused — and the directory keeps being polled exactly as before — outside a repository, for a worktree of more than 4096 directories (a recursive watch costs one inotify descriptor per directory, a finite per-user resource), when the platform watcher cannot start, and beyond 16 watched directories, where the oldest is withdrawn and the daemon says so. Pushes are the one exception to id correlation: they carry `id: 0` and are matched by path against the directories this client asked to watch, so an event for anything else is discarded. `:SimpleLineHealth` reports `git watch: on/negotiated, N dir(s) watched` and whether the current directory is watched or polled.
 
 ### Buffer tabline
 
@@ -204,7 +207,8 @@ The legacy `:BufferJump1` … `:BufferJump0` commands remain available.
 
 - No Git segment: run `:SimpleLineHealth`, then `./install.sh`. Confirm that `git` is on `$PATH`.
 - Boxes instead of icons: install a Nerd Font or set `g:simpleline_nerdfont = 0`.
-- Too much polling: set `g:simpleline_git_interval = 0`; buffer/focus/write events still refresh.
+- Too much polling: check `git watch:` in `:SimpleLineHealth` — watched directories are not polled. `on/unavailable` means the daemon predates the capability: run `./install.sh`, then `:SimpleLineRestart`. Otherwise set `g:simpleline_git_interval = 0`; buffer/focus/write events still refresh.
+- Changes arrive late on a network or container mount: set `g:simpleline_git_watch = 0` to keep polling everywhere.
 - A custom statusline should coexist: set `g:simpleline_statusline = 0` or toggle Simpleline. Disable restores values owned before enable and leaves user changes made while active alone.
 - No visible statusline: Simpleline raises `laststatus` to 2 when necessary and restores it on disable; check the value in `:SimpleLineHealth`.
 - More daemon detail: set `g:simpleline_debug = 1`, reload, and inspect `:messages`.

@@ -32,8 +32,14 @@ g:simpleline_enable_default_mappings = ConfigFlag('simpleline_enable_default_map
 
 # Separator style: 'arrow' (powerline), 'round', 'plain'
 g:simpleline_separator = get(g:, 'simpleline_separator', 'arrow')
-# Git info refresh interval (ms)
+# Git info refresh interval (ms). Only directories the daemon is not watching
+# are polled at all, so with a 'watch'-capable daemon this is the fallback rate,
+# not the refresh rate.
 g:simpleline_git_interval = get(g:, 'simpleline_git_interval', 2000)
+# Let a capable daemon report a repository's changes instead of being asked for
+# them every interval. Turn it off on a filesystem whose change notifications
+# are unreliable — some network and container mounts — to keep the poll.
+g:simpleline_git_watch = ConfigFlag('simpleline_git_watch', 1)
 # Where the branch and ahead/behind come from: 'auto' prefers simplegit's
 # published status dictionary and falls back to Simpleline's own daemon,
 # 'daemon' ignores simplegit, 'simplegit' ignores the daemon.

@@ -1,13 +1,15 @@
+use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, HashMap, VecDeque},
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, Mutex},
     time::Duration,
 };
 use tokio::io::{self, AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
-use tokio::sync::{OnceCell, OwnedSemaphorePermit, Semaphore};
+use tokio::sync::{OnceCell, OwnedSemaphorePermit, Semaphore, mpsc};
 use tokio::task::{JoinError, JoinSet};
+use tokio::time::{Instant, sleep_until};
 
 const GIT_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_CONCURRENT_GIT_REQUESTS: usize = 4;
@@ -25,6 +27,24 @@ const PROTOCOL_VERSION: u32 = 2;
 // says so, which is honest about the tabline showing fewer marks than there are
 // changes.
 const MAX_TRACKED_PATHS: usize = 2000;
+// Watching is what lets a client stop polling, so the daemon must be the one
+// paying for it — and it pays in inotify watch descriptors, a finite per-user
+// resource shared with every other program on the machine.  A session that
+// visits many repositories therefore keeps only the most recently requested
+// directories watched; the rest are withdrawn and go back on the client's poll.
+const MAX_WATCHED_DIRS: usize = 16;
+// A recursive watch costs one descriptor per directory in the tree.  The
+// default /proc/sys/fs/inotify/max_user_watches is 8192 on many distributions,
+// so one monorepo could consume the whole quota — for the editor *and* for
+// every other watcher the user is running.  A tree bigger than this keeps being
+// polled, which is exactly what it did before watching existed.
+const MAX_WATCH_TREE_DIRS: usize = 4096;
+// A single `git add` or editor save produces a burst of filesystem events.
+// Coalescing them into one `git status` is the difference between event-driven
+// and event-stormed; the hard deadline keeps a continuously churning tree (a
+// build writing into the worktree) from starving the client forever.
+const WATCH_QUIET_WINDOW: Duration = Duration::from_millis(200);
+const WATCH_HARD_DEADLINE: Duration = Duration::from_millis(1000);
 const GIT_REPOSITORY_ENV_VARS: [&str; 8] = [
     "GIT_DIR",
     "GIT_WORK_TREE",
@@ -51,6 +71,18 @@ enum Request {
         #[serde(default)]
         want_files: bool,
     },
+    /// Report this directory's changes instead of being asked for them. The
+    /// answer is a `watch` event saying whether the watch was granted; a
+    /// refusal is a normal outcome and means "keep polling".
+    #[serde(rename = "watch")]
+    Watch {
+        id: u64,
+        path: String,
+        #[serde(default)]
+        want_files: bool,
+    },
+    #[serde(rename = "unwatch")]
+    Unwatch { id: u64, path: String },
 }
 
 #[derive(Debug, Serialize)]
@@ -88,6 +120,15 @@ enum Event {
         // Absolute worktree root the paths above are relative to.
         repo_root: String,
     },
+    /// Whether `path` is being watched. Sent as the reply to a watch/unwatch
+    /// request, and unsolicited with `id: 0` when the daemon withdraws a watch
+    /// it had granted — the client must then resume polling that directory.
+    #[serde(rename = "watch")]
+    Watch {
+        id: u64,
+        path: String,
+        watching: bool,
+    },
     #[serde(rename = "error")]
     Error { id: u64, message: String },
 }
@@ -107,9 +148,12 @@ where
 type EventTx = tokio::sync::mpsc::Sender<String>;
 
 /// Features a client may ask for by name rather than infer from a version
-/// number. The supervisor keeps this dictionary and answers `HasCap()` from it.
-fn capabilities() -> BTreeMap<&'static str, bool> {
-    BTreeMap::from([("git-status", true)])
+/// number. The supervisor keeps this dictionary and answers `HasCap()` from it,
+/// and `HasCap()` is truthiness-based, so advertising `watch: false` on a
+/// platform whose watcher would not start reads as "unavailable" rather than as
+/// a missing key — the client keeps polling either way.
+fn capabilities(watching: bool) -> BTreeMap<&'static str, bool> {
+    BTreeMap::from([("git-status", true), ("watch", watching)])
 }
 
 async fn send_event(out: &EventTx, evt: &Event) {
@@ -118,7 +162,7 @@ async fn send_event(out: &EventTx, evt: &Event) {
     }
 }
 
-#[derive(Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 struct GitStatus {
     branch: String,
     dirty: bool,
@@ -502,6 +546,29 @@ async fn query_git_status(path: &str, want_files: bool) -> Result<GitStatus, Str
     Ok(status)
 }
 
+/// The one place a `GitStatus` becomes a wire event, so a solicited reply and a
+/// watch push cannot drift into reporting different fields.
+fn git_info_event(id: u64, path: String, status: GitStatus) -> Event {
+    Event::GitInfo {
+        id,
+        path,
+        branch: status.branch,
+        dirty: status.dirty,
+        added: status.added,
+        modified: status.modified,
+        deleted: status.deleted,
+        conflicts: status.conflicts,
+        stash: status.stash,
+        operation: status.operation,
+        ahead: status.ahead,
+        behind: status.behind,
+        is_git: status.is_git,
+        files: status.files,
+        files_truncated: status.files_truncated,
+        repo_root: status.repo_root,
+    }
+}
+
 async fn handle_git_info(
     id: u64,
     path: String,
@@ -510,32 +577,274 @@ async fn handle_git_info(
     _permit: OwnedSemaphorePermit,
 ) {
     match query_git_status(&path, want_files).await {
-        Ok(status) => {
-            send_event(
-                &tx,
-                &Event::GitInfo {
-                    id,
-                    path,
-                    branch: status.branch,
-                    dirty: status.dirty,
-                    added: status.added,
-                    modified: status.modified,
-                    deleted: status.deleted,
-                    conflicts: status.conflicts,
-                    stash: status.stash,
-                    operation: status.operation,
-                    ahead: status.ahead,
-                    behind: status.behind,
-                    is_git: status.is_git,
-                    files: status.files,
-                    files_truncated: status.files_truncated,
-                    repo_root: status.repo_root,
-                },
-            )
-            .await;
-        }
+        Ok(status) => send_event(&tx, &git_info_event(id, path, status)).await,
         Err(message) => send_event(&tx, &Event::Error { id, message }).await,
     }
+}
+
+// ---------------------------------------------------------------------------
+// Watching
+//
+// Polling is the client asking "did anything change?" several times a second
+// forever; watching is the daemon answering only when something did. The client
+// keeps the poll for every directory that is not watched, so every refusal
+// below — an unwatchable platform, a tree too large, more repositories than the
+// descriptor budget allows — degrades to exactly the behaviour that existed
+// before this file learned to watch anything.
+// ---------------------------------------------------------------------------
+
+/// One watched client directory: the worktree root notify actually watches
+/// (several client directories in one repository share it) and whether that
+/// client asked for per-file marks.
+#[derive(Clone, Debug)]
+struct WatchEntry {
+    root: PathBuf,
+    want_files: bool,
+}
+
+/// Shared with the notify callback thread and the debounce task: the callback
+/// maps an event path back to a root through it, the debounce task turns a root
+/// back into the client directories that must be re-queried.
+type WatchDirs = Arc<Mutex<HashMap<String, WatchEntry>>>;
+
+/// Which watched root owns an event path. Deepest match wins, because a
+/// submodule or a nested repository sits inside its parent's tree and its own
+/// status is the one that changed.
+fn owning_root(dirs: &HashMap<String, WatchEntry>, path: &Path) -> Option<PathBuf> {
+    dirs.values()
+        .map(|entry| &entry.root)
+        .filter(|root| path.starts_with(root))
+        .max_by_key(|root| root.components().count())
+        .cloned()
+}
+
+/// Count directories under `root`, stopping once the answer is known to exceed
+/// `limit`. Symlinked directories are not followed: notify does not recurse into
+/// them either, and a link pointing back up the tree would not terminate.
+fn count_dirs_bounded(root: &Path, limit: usize) -> usize {
+    let mut stack = vec![root.to_path_buf()];
+    let mut seen = 0usize;
+    while let Some(dir) = stack.pop() {
+        seen += 1;
+        if seen > limit {
+            return seen;
+        }
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+                stack.push(entry.path());
+            }
+        }
+    }
+    seen
+}
+
+struct WatchService {
+    watcher: RecommendedWatcher,
+    dirs: WatchDirs,
+    /// Watched client directories, oldest request first. The cap is on watch
+    /// descriptors, so the eviction order is by age of the request.
+    order: VecDeque<String>,
+    /// Distinct roots handed to notify, with how many client directories still
+    /// need each. Two buffers in the same repository must not cost two
+    /// recursive watches, and unwatching one must not blind the other.
+    roots: HashMap<PathBuf, usize>,
+}
+
+impl WatchService {
+    /// `None` when the platform watcher cannot be created — a container with no
+    /// inotify quota left, a filesystem that supports no notifications. The
+    /// caller must then leave the `watch` capability unadvertised.
+    fn start(out: EventTx) -> Option<WatchService> {
+        let dirs: WatchDirs = Arc::new(Mutex::new(HashMap::new()));
+        let (raw_tx, raw_rx) = mpsc::unbounded_channel::<PathBuf>();
+        let callback_dirs = Arc::clone(&dirs);
+        let watcher = notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
+            // The callback runs on notify's own thread; an unbounded channel is
+            // what lets it hand work to the runtime without blocking it.
+            let Ok(event) = event else {
+                return;
+            };
+            let Ok(map) = callback_dirs.lock() else {
+                return;
+            };
+            for path in &event.paths {
+                if let Some(root) = owning_root(&map, path) {
+                    // A send failure means the daemon is shutting down.
+                    let _ = raw_tx.send(root);
+                }
+            }
+        })
+        .ok()?;
+        tokio::spawn(debounce_watch_events(raw_rx, Arc::clone(&dirs), out));
+        Some(WatchService {
+            watcher,
+            dirs,
+            order: VecDeque::new(),
+            roots: HashMap::new(),
+        })
+    }
+
+    fn is_watched(&self, path: &str) -> bool {
+        self.dirs.lock().is_ok_and(|map| map.contains_key(path))
+    }
+
+    /// Grant a watch, returning whether it was granted plus the directories
+    /// evicted to make room. Refusal is not an error — the client polls.
+    fn watch(&mut self, path: &str, want_files: bool) -> (bool, Vec<String>) {
+        if self.is_watched(path) {
+            self.set_want_files(path, want_files);
+            return (true, Vec::new());
+        }
+        let Some(repo) = discover_repo(path) else {
+            // Nothing to watch for: outside a repository the status never
+            // changes, so polling it is already almost free.
+            return (false, Vec::new());
+        };
+        let root = repo.worktree_root;
+        let mut withdrawn = Vec::new();
+        while self.order.len() >= MAX_WATCHED_DIRS {
+            let Some(oldest) = self.order.front().cloned() else {
+                break;
+            };
+            self.drop_dir(&oldest);
+            withdrawn.push(oldest);
+        }
+        if !self.roots.contains_key(&root)
+            && (count_dirs_bounded(&root, MAX_WATCH_TREE_DIRS) > MAX_WATCH_TREE_DIRS
+                || self.watcher.watch(&root, RecursiveMode::Recursive).is_err())
+        {
+            return (false, withdrawn);
+        }
+        let Ok(mut map) = self.dirs.lock() else {
+            return (false, withdrawn);
+        };
+        map.insert(
+            path.to_string(),
+            WatchEntry {
+                root: root.clone(),
+                want_files,
+            },
+        );
+        drop(map);
+        *self.roots.entry(root).or_insert(0) += 1;
+        self.order.push_back(path.to_string());
+        (true, withdrawn)
+    }
+
+    fn set_want_files(&self, path: &str, want_files: bool) {
+        if let Ok(mut map) = self.dirs.lock()
+            && let Some(entry) = map.get_mut(path)
+        {
+            entry.want_files = want_files;
+        }
+    }
+
+    /// Forget one client directory, releasing the notify watch once no other
+    /// directory in the same repository still needs it.
+    fn drop_dir(&mut self, path: &str) -> bool {
+        let removed = match self.dirs.lock() {
+            Ok(mut map) => map.remove(path),
+            Err(_) => return false,
+        };
+        let Some(entry) = removed else {
+            return false;
+        };
+        self.order.retain(|watched| watched != path);
+        if let Some(remaining) = self.roots.get_mut(&entry.root) {
+            *remaining -= 1;
+            if *remaining == 0 {
+                self.roots.remove(&entry.root);
+                let _ = self.watcher.unwatch(&entry.root);
+            }
+        }
+        true
+    }
+}
+
+/// Coalesce raw filesystem events per repository root and re-query Git once the
+/// tree has been quiet for `WATCH_QUIET_WINDOW`, or once `WATCH_HARD_DEADLINE`
+/// has passed for a tree that never goes quiet.
+async fn debounce_watch_events(
+    mut rx: mpsc::UnboundedReceiver<PathBuf>,
+    dirs: WatchDirs,
+    out: EventTx,
+) {
+    // root -> (earliest time it may fire, latest time it may wait)
+    let mut pending: HashMap<PathBuf, (Instant, Instant)> = HashMap::new();
+    // Only a *changed* status is worth a line on the wire: `git status` runs
+    // after every burst, and a build touching files it does not track would
+    // otherwise push an identical payload every second.
+    let mut last: HashMap<String, GitStatus> = HashMap::new();
+
+    loop {
+        let wake = pending
+            .values()
+            .map(|(quiet, hard)| (*quiet).min(*hard))
+            .min();
+        tokio::select! {
+            received = rx.recv() => match received {
+                Some(root) => {
+                    let now = Instant::now();
+                    let slot = pending
+                        .entry(root)
+                        .or_insert((now, now + WATCH_HARD_DEADLINE));
+                    slot.0 = now + WATCH_QUIET_WINDOW;
+                }
+                // The service was dropped: the daemon is shutting down.
+                None => return,
+            },
+            _ = sleep_until(wake.unwrap_or_else(Instant::now)), if wake.is_some() => {}
+        }
+
+        let now = Instant::now();
+        let ready: Vec<PathBuf> = pending
+            .iter()
+            .filter(|(_, (quiet, hard))| *quiet <= now || *hard <= now)
+            .map(|(root, _)| root.clone())
+            .collect();
+        for root in ready {
+            pending.remove(&root);
+            flush_watched_root(&root, &dirs, &out, &mut last).await;
+        }
+    }
+}
+
+async fn flush_watched_root(
+    root: &Path,
+    dirs: &WatchDirs,
+    out: &EventTx,
+    last: &mut HashMap<String, GitStatus>,
+) {
+    // The lock is taken and released around the awaits, never held across one:
+    // the notify callback thread must never wait on a `git status`.
+    let targets: Vec<(String, bool)> = match dirs.lock() {
+        Ok(map) => map
+            .iter()
+            .filter(|(_, entry)| entry.root == root)
+            .map(|(path, entry)| (path.clone(), entry.want_files))
+            .collect(),
+        Err(_) => return,
+    };
+    for (path, want_files) in targets {
+        match query_git_status(&path, want_files).await {
+            Ok(status) => {
+                if last.get(&path) == Some(&status) {
+                    continue;
+                }
+                last.insert(path.clone(), status.clone());
+                send_event(out, &git_info_event(0, path, status)).await;
+            }
+            Err(message) => send_event(out, &Event::Error { id: 0, message }).await,
+        }
+    }
+    let live: Vec<String> = match dirs.lock() {
+        Ok(map) => map.keys().cloned().collect(),
+        Err(_) => return,
+    };
+    last.retain(|path, _| live.contains(path));
 }
 
 fn validate_request_path(path: &str) -> Result<(), String> {
@@ -628,6 +937,10 @@ where
     let writer = tokio::spawn(stdout_writer(output, out_rx));
     let git_limiter = Arc::new(Semaphore::new(MAX_CONCURRENT_GIT_REQUESTS));
     let mut requests = JoinSet::new();
+    // Started eagerly so the handshake can say truthfully whether this daemon
+    // can watch at all; the watcher itself costs one file descriptor and no
+    // watch descriptors until a directory is actually requested.
+    let mut watch_service = WatchService::start(out_tx.clone());
 
     while let Some(line) = read_request_line(&mut input).await? {
         while let Some(result) = requests.try_join_next() {
@@ -668,7 +981,7 @@ where
                         id,
                         version: env!("CARGO_PKG_VERSION"),
                         protocol: PROTOCOL_VERSION,
-                        capabilities: capabilities(),
+                        capabilities: capabilities(watch_service.is_some()),
                     },
                 )
                 .await;
@@ -701,12 +1014,60 @@ where
                     handle_git_info(id, path, want_files, tx, permit).await;
                 });
             }
+            Request::Watch {
+                id,
+                path,
+                want_files,
+            } => {
+                if let Err(message) = validate_request_path(&path) {
+                    send_event(&out_tx, &Event::Error { id, message }).await;
+                    continue;
+                }
+                let (watching, withdrawn) = match watch_service.as_mut() {
+                    Some(service) => service.watch(&path, want_files),
+                    None => (false, Vec::new()),
+                };
+                // Withdrawals go out before the grant that caused them, so a
+                // client never sees itself watching more directories than the
+                // daemon admits to.
+                for evicted in withdrawn {
+                    send_event(
+                        &out_tx,
+                        &Event::Watch {
+                            id: 0,
+                            path: evicted,
+                            watching: false,
+                        },
+                    )
+                    .await;
+                }
+                send_event(&out_tx, &Event::Watch { id, path, watching }).await;
+            }
+            Request::Unwatch { id, path } => {
+                if let Some(service) = watch_service.as_mut() {
+                    service.drop_dir(&path);
+                }
+                send_event(
+                    &out_tx,
+                    &Event::Watch {
+                        id,
+                        path,
+                        watching: false,
+                    },
+                )
+                .await;
+            }
         }
     }
 
     while let Some(result) = requests.join_next().await {
         report_request_completion(result, &out_tx).await;
     }
+    // Dropping the service drops the notify callback that owns the raw-event
+    // sender, which ends the debounce task, which releases the last clone of
+    // the event channel. Without this the writer below would wait for a sender
+    // that never goes away and the daemon would never exit.
+    drop(watch_service);
     drop(out_tx);
 
     writer
@@ -806,12 +1167,14 @@ async fn main() -> std::process::ExitCode {
 mod tests {
     use super::{
         Event, GIT_REPOSITORY_ENV_VARS, GitStatus, MAX_REQUEST_LINE_BYTES, MAX_REQUEST_PATH_BYTES,
-        MAX_TRACKED_PATHS, PROTOCOL_VERSION, Request, capabilities, detect_git_operation,
-        discover_repo, git_status_command, git_version_supports_show_stash,
-        interpret_status_failure, parse_git_status, read_request_line, run, validate_request_path,
+        MAX_TRACKED_PATHS, MAX_WATCH_TREE_DIRS, PROTOCOL_VERSION, Request, WatchEntry,
+        capabilities, count_dirs_bounded, detect_git_operation, discover_repo, git_status_command,
+        git_version_supports_show_stash, interpret_status_failure, owning_root, parse_git_status,
+        read_request_line, run, validate_request_path,
     };
-    use std::collections::BTreeMap;
-    use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader};
+    use std::collections::{BTreeMap, HashMap};
+    use std::path::{Path, PathBuf};
+    use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 
     #[test]
     fn parses_normal_branch_and_change_counts() {
@@ -1251,7 +1614,7 @@ u UU N... 100644 100644 100644 100644 1111111 2222222 3333333 conflict.txt
             id: 7,
             version: env!("CARGO_PKG_VERSION"),
             protocol: PROTOCOL_VERSION,
-            capabilities: capabilities(),
+            capabilities: capabilities(true),
         })
         .unwrap();
 
@@ -1261,6 +1624,24 @@ u UU N... 100644 100644 100644 100644 1111111 2222222 3333333 conflict.txt
         assert_eq!(json["protocol"], PROTOCOL_VERSION);
         // The supervisor reads capabilities as a dictionary and answers
         // HasCap() from it; a list would be discarded silently.
+        assert_eq!(json["capabilities"]["git-status"], true);
+        assert_eq!(json["capabilities"]["watch"], true);
+    }
+
+    // HasCap() is truthiness-based, so a platform whose watcher will not start
+    // has to advertise the key as false rather than omit it — omitting it would
+    // read the same to the client, but only by accident.
+    #[test]
+    fn unavailable_watcher_advertises_the_capability_as_false() {
+        let json = serde_json::to_value(Event::Version {
+            id: 1,
+            version: env!("CARGO_PKG_VERSION"),
+            protocol: PROTOCOL_VERSION,
+            capabilities: capabilities(false),
+        })
+        .unwrap();
+
+        assert_eq!(json["capabilities"]["watch"], false);
         assert_eq!(json["capabilities"]["git-status"], true);
     }
 
@@ -1393,7 +1774,184 @@ u UU N... 100644 100644 100644 100644 1111111 2222222 3333333 conflict.txt
                 // status must keep parsing as it always did.
                 assert!(!want_files);
             }
-            Request::Version { .. } => panic!("expected git_info request"),
+            other => panic!("expected git_info request, got {other:?}"),
         }
+    }
+
+    // ------------------------------------------------------------- watching --
+
+    fn scratch_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "simpleline-{name}-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn entry(root: &str) -> WatchEntry {
+        WatchEntry {
+            root: PathBuf::from(root),
+            want_files: false,
+        }
+    }
+
+    /// A submodule lives inside its parent's tree, so both roots match one
+    /// event path. The change belongs to the inner repository — attributing it
+    /// to the outer one would re-query the wrong `git status` and leave the
+    /// submodule's own segment frozen.
+    #[test]
+    fn the_deepest_watched_root_owns_an_event_path() {
+        let dirs = HashMap::from([
+            ("/work/outer".to_string(), entry("/work/outer")),
+            ("/work/outer/sub".to_string(), entry("/work/outer/sub")),
+        ]);
+
+        assert_eq!(
+            owning_root(&dirs, Path::new("/work/outer/sub/src/lib.rs")),
+            Some(PathBuf::from("/work/outer/sub"))
+        );
+        assert_eq!(
+            owning_root(&dirs, Path::new("/work/outer/README.md")),
+            Some(PathBuf::from("/work/outer"))
+        );
+        assert_eq!(owning_root(&dirs, Path::new("/elsewhere/file")), None);
+    }
+
+    #[test]
+    fn directory_counting_stops_once_the_limit_is_known_to_be_passed() {
+        let root = scratch_dir("count");
+        for index in 0..5 {
+            std::fs::create_dir_all(root.join(format!("d{index}/nested"))).unwrap();
+        }
+
+        // 1 root + 5 + 5 nested.
+        assert_eq!(count_dirs_bounded(&root, MAX_WATCH_TREE_DIRS), 11);
+        // Over the limit the exact count is never computed: the answer is only
+        // ever compared against the limit, and walking a monorepo to produce a
+        // number nobody reads is the cost this bound exists to avoid.
+        assert!(count_dirs_bounded(&root, 3) > 3);
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    async fn next_event(
+        reader: &mut BufReader<tokio::io::DuplexStream>,
+    ) -> Option<serde_json::Value> {
+        let mut line = String::new();
+        let read = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            reader.read_line(&mut line),
+        )
+        .await
+        .ok()?
+        .ok()?;
+        (read > 0).then(|| serde_json::from_str(line.trim()).unwrap())
+    }
+
+    /// Outside a repository there is no status to report and nothing to notice,
+    /// so the watch is refused and the client keeps polling — the behaviour it
+    /// had before this daemon could watch anything.
+    #[tokio::test]
+    async fn refuses_to_watch_a_path_outside_any_repository() {
+        let dir = scratch_dir("nowatch");
+        let (mut request_writer, request_reader) = tokio::io::duplex(4096);
+        let (response_writer, response_reader) = tokio::io::duplex(65_536);
+        let runner = tokio::spawn(run(request_reader, response_writer));
+        let mut reader = BufReader::new(response_reader);
+
+        let request = serde_json::json!({"type": "watch", "id": 9, "path": dir});
+        request_writer
+            .write_all(format!("{request}\n").as_bytes())
+            .await
+            .unwrap();
+
+        let event = next_event(&mut reader).await.unwrap();
+        assert_eq!(event["type"], "watch");
+        assert_eq!(event["id"], 9);
+        assert_eq!(event["watching"], false);
+
+        request_writer.shutdown().await.unwrap();
+        runner.await.unwrap().unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The whole feature in one assertion: after a granted watch, a change in
+    /// the worktree produces a `git_info` with `id: 0` that no request asked
+    /// for. Without it the client would have to keep polling to find out.
+    #[tokio::test]
+    async fn a_granted_watch_pushes_an_unsolicited_update() {
+        let dir = scratch_dir("watch");
+        let init = std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(&dir)
+            .status()
+            .expect("git is required to run the daemon at all");
+        assert!(init.success());
+
+        let (mut request_writer, request_reader) = tokio::io::duplex(4096);
+        let (response_writer, response_reader) = tokio::io::duplex(65_536);
+        let runner = tokio::spawn(run(request_reader, response_writer));
+        let mut reader = BufReader::new(response_reader);
+
+        let request = serde_json::json!({
+            "type": "watch", "id": 4, "path": dir, "want_files": true,
+        });
+        request_writer
+            .write_all(format!("{request}\n").as_bytes())
+            .await
+            .unwrap();
+
+        let ack = next_event(&mut reader).await.unwrap();
+        assert_eq!(ack["type"], "watch");
+        assert_eq!(ack["id"], 4);
+        assert_eq!(ack["watching"], true, "a repository is watchable");
+
+        std::fs::write(dir.join("new.txt"), "hello\n").unwrap();
+
+        let push = next_event(&mut reader)
+            .await
+            .expect("a watched worktree reports its own change");
+        assert_eq!(push["type"], "git_info");
+        assert_eq!(
+            push["id"], 0,
+            "an unsolicited event carries the reserved id so a client can tell \
+             it apart from an answer it is waiting for"
+        );
+        assert_eq!(push["added"], 1);
+        assert_eq!(push["dirty"], true);
+        // want_files travelled with the watch request, not with a git_info one.
+        assert_eq!(push["files"]["new.txt"], "A");
+
+        request_writer.shutdown().await.unwrap();
+        runner.await.unwrap().unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// An unwatch is acknowledged even for a directory that was never watched,
+    /// so a client resyncing after a restart cannot deadlock waiting for a
+    /// reply it will never get.
+    #[tokio::test]
+    async fn unwatch_is_always_acknowledged() {
+        let (mut request_writer, request_reader) = tokio::io::duplex(4096);
+        let (response_writer, response_reader) = tokio::io::duplex(65_536);
+        let runner = tokio::spawn(run(request_reader, response_writer));
+        let mut reader = BufReader::new(response_reader);
+
+        let request = serde_json::json!({"type": "unwatch", "id": 12, "path": "/nowhere"});
+        request_writer
+            .write_all(format!("{request}\n").as_bytes())
+            .await
+            .unwrap();
+
+        let event = next_event(&mut reader).await.unwrap();
+        assert_eq!(event["type"], "watch");
+        assert_eq!(event["id"], 12);
+        assert_eq!(event["watching"], false);
+
+        request_writer.shutdown().await.unwrap();
+        runner.await.unwrap().unwrap();
     }
 }

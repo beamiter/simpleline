@@ -2,6 +2,52 @@
 
 ## Unreleased - 2026-08-08
 
+### 新增:daemon 可以主动上报 Git 变化,不必再按周期轮询
+
+原来的刷新模型是每 2000ms 对当前目录跑一次 `git status`——不管有没有变化,
+永远跑。大仓库上一次就是几百毫秒,所以 README 的排错一节只能建议用户把
+`g:simpleline_git_interval` 设成 0;可是关掉轮询之后,在终端里 `git commit`
+完,分支就再也不会自己更新了。
+
+daemon 现在在握手时多广播一个 `watch` 能力,并且认识两个新请求:
+
+- `{"type":"watch","id":N,"path":P,"want_files":B}` → 回
+  `{"type":"watch","id":N,"path":P,"watching":true|false}`。
+- `{"type":"unwatch","id":N,"path":P}` → 同样回一个 `watching:false`。
+
+被 watch 的目录上,daemon 递归监听 worktree,把一阵文件事件按 200ms 静默窗口
+(1s 硬上限)并成一次,只在状态真的变了的时候重新跑 `git status`,然后推一条
+**没有人请求过**的 `git_info` 事件。客户端那边这个目录就完全不再进轮询了;
+`BufEnter`/`BufWritePost`/`DirChanged`/`FocusGained` 仍然会主动问一次,所以不
+存在"等下一个事件"的空窗。
+
+拒绝 watch 是正常结果,拒绝之后那个目录还是走原来的轮询,行为和这个功能不
+存在时一模一样。会拒绝的情况:路径不在仓库里;worktree 超过 4096 个目录
+(递归 watch 是每个目录一个 inotify 描述符,这是全用户共享的有限资源,一个
+monorepo 就能把别人的额度吃光);平台的 watcher 起不来;已经 watch 了 16 个
+目录——这时会淘汰最老的那个,并且主动发一条 `watching:false` 告诉客户端它得
+自己轮询回去。一次拒绝在 daemon 这条进程的生命周期内不再重试,否则"每个 tick
+一个请求"这件本来要消掉的事就换个名字回来了。
+
+- 主动推送是"每个回复都由 id 关联到它的请求"这条规矩唯一的例外:它们的 id
+  是 0,改用 **path** 关联——而且只认这个客户端请求过、daemon 也确认过的目录。
+  没有这一层,任何一条事件都能写任何一个缓存项,那正是 id 关联本来要防的事;
+  把 `TakePending()` 的 id 检查放松掉则会连带把有请求的回复也一起放开。
+- daemon 重启之后 watch 全部失效:`ClearPending()` 现在一并清掉 watch 状态,
+  否则那些目录会既不被轮询、也不被上报,余下的整个 session 都是冻的。
+- 新增 `g:simpleline_git_watch`(默认 1)。选项在能力之前判断,所以在变更通知
+  不可靠的挂载点(某些网络盘、容器 bind mount)上可以只关掉 watch 而不必重新
+  编译 daemon。
+- `:SimpleLineHealth` 新增 `git watch: on/negotiated, N dir(s) watched`,并在
+  `Git interval/timer:` 那行标出当前目录是 watched 还是 polled——"为什么不刷新"
+  和"为什么一直在跑 git" 这两个问题都得有地方回答。
+- 测试:Rust 侧 `a_granted_watch_pushes_an_unsolicited_update` 在真仓库上建一个
+  文件,断言 `id:0` 的 `git_info` 会自己送到(含 `want_files` 随 watch 请求一起
+  生效);另有拒绝非仓库路径、unwatch 必然应答、`watch` 能力为 false 时如实广播
+  三个用例。Vim 侧新增 `tests/vim/git_watch.vim`:能力门(把
+  `HasCap('watch')` 换成 `true` 会红)、被 watch 的目录不再轮询、withdraw 之后
+  重新回到轮询、以及给一个没在 watch 的路径推事件不会进缓存。
+
 ### 修复:被标记的 buffer 两侧的 powerline 楔形颜色对不上
 
 powerline 分隔符是一个楔形:字形用左边那一格的背景色画,底色是右边那一格的

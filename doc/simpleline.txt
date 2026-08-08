@@ -168,6 +168,7 @@ and are now memoized:
 GIT ~
 g:simpleline_git_enabled              1
 g:simpleline_git_interval             2000 ms; minimum 250; 0 is event-only
+g:simpleline_git_watch                1 (let a capable daemon report changes)
 g:simpleline_git_show_status          1
 g:simpleline_git_show_operation       1 (show REBASE/MERGE/etc.)
 g:simpleline_git_provider             'auto' ('daemon', 'simplegit')
@@ -184,6 +185,36 @@ known-good segment instead of blanking the branch and operation. Operation
 detection reads Git's sentinel files and starts no extra process. Directory symlinks are resolved before repository discovery; an
 unresolvable physical path reports no operation instead of consulting a
 possibly unrelated lexical parent repository.
+
+WATCHING                                            *simpleline-git-watch*
+
+A daemon advertising the "watch" capability is asked to report a directory's
+changes instead of being asked for them every g:simpleline_git_interval. A
+watched directory is not polled at all: the daemon watches the worktree,
+coalesces bursts of filesystem events, re-runs `git status` only when
+something changed, and pushes an unsolicited git_info event. Buffer entry,
+write, directory change and focus still request a refresh, so a repository
+change is never waited for.
+
+Watching is refused — and the directory keeps being polled exactly as before
+— when the path is outside a repository, when the worktree has more than 4096
+directories (a recursive watch costs one inotify descriptor per directory, a
+finite per-user resource), when the platform watcher cannot start, or when
+the daemon already watches 16 directories. In the last case the oldest watch
+is withdrawn, the daemon says so, and that directory goes back on the poll.
+A refusal is not retried until the daemon restarts.
+
+Unsolicited events are the one exception to "every reply is correlated to its
+request by id". They carry id 0 and are correlated by path instead, against
+the directories this client asked to watch and the daemon confirmed; an event
+for anything else is discarded.
+
+:SimpleLineHealth reports "git watch: on/negotiated, N dir(s) watched" and
+whether the current directory is watched or polled.
+
+Set g:simpleline_git_watch to 0 to keep the poll — worth doing on a
+filesystem whose change notifications are unreliable, such as some network
+and container mounts.
 
 TABLINE ~
 g:simpletabline_show_modified         1
@@ -327,7 +358,14 @@ No per-file tabline paint :SimpleLineHealth reports "git file status:
                           "git-status" capability: run ./install.sh, then
                           :SimpleLineRestart.
 Broken icon glyphs        Install a Nerd Font or set simpleline_nerdfont to 0.
-Polling is unnecessary    Set simpleline_git_interval to 0.
+Polling is unnecessary    Watched directories are not polled; check "git
+                          watch:" in :SimpleLineHealth. If it says
+                          "on/unavailable", run ./install.sh then
+                          :SimpleLineRestart. Otherwise set
+                          simpleline_git_interval to 0.
+Changes arrive late       Set simpleline_git_watch to 0 if the worktree is on
+                          a mount with unreliable change notifications; the
+                          poll then runs everywhere again.
 Need daemon errors        Set simpleline_debug to 1 and inspect :messages.
 No visible statusline     Check 'laststatus' in :SimpleLineHealth; Simpleline
                           raises values below 2 and restores them on disable.

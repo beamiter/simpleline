@@ -28,6 +28,14 @@ var s_git_cache: dict<dict<any>> = {}
 var s_git_pending: dict<string> = {}
 var s_git_inflight: dict<number> = {}
 var s_git_refresh_again: dict<bool> = {}
+# Directories a 'watch'-capable daemon has agreed to report changes for, and
+# which are therefore not polled.  A refusal is recorded and never retried for
+# the life of this daemon process: the daemon refuses because it is at capacity
+# or the tree is too large to watch, and re-asking on every poll would turn the
+# one thing watching was meant to remove — a request per tick — back on.
+var s_git_watched: dict<bool> = {}
+var s_git_watch_pending: dict<bool> = {}
+var s_git_watch_refused: dict<bool> = {}
 
 # UI state owned by the user, restored exactly when Simpleline is disabled.
 var s_saved_global_statusline: string = ''
@@ -2055,6 +2063,13 @@ def ClearPending()
   s_git_pending = {}
   s_git_inflight = {}
   s_git_refresh_again = {}
+  # Watches live in the daemon process.  A restarted daemon watches nothing, so
+  # believing otherwise would leave every previously watched directory both
+  # unpolled and unreported — frozen for the rest of the session.  The refusals
+  # go with them: a fresh process has fresh capacity.
+  s_git_watched = {}
+  s_git_watch_pending = {}
+  s_git_watch_refused = {}
 enddef
 
 def TakePending(id: number): string
@@ -2132,14 +2147,34 @@ def OnGitInfo(ev: dict<any>)
     DebugLog('daemon returned a git event without a numeric id')
     return
   endif
-  var dir = TakePending(id)
-  if dir ==# ''
-    DebugLog('ignored stale git response ' .. id)
-    return
+  # Every answer is correlated to the request that asked for it — except a
+  # watch push, which no request asked for.  Id 0 is reserved for those, and
+  # they are correlated by path instead, against the directories this client
+  # asked to watch and the daemon agreed to.  Without that check any event
+  # could write any cache entry, which is precisely what the id correlation
+  # exists to prevent; relaxing TakePending() instead would give up the rule
+  # for solicited replies too.
+  var pushed = id == 0
+  var dir = ''
+  if pushed
+    var path = get(ev, 'path', v:null)
+    dir = type(path) == v:t_string ? path : ''
+    if dir ==# '' || !has_key(s_git_watched, dir)
+      DebugLog('ignored unsolicited git event for unwatched ' .. VisibleText(dir))
+      return
+    endif
+  else
+    dir = TakePending(id)
+    if dir ==# ''
+      DebugLog('ignored stale git response ' .. id)
+      return
+    endif
   endif
   if !ValidGitInfo(ev, dir)
     DebugLog('ignored malformed git response for request ' .. id)
-    RefreshQueuedGit(dir)
+    if !pushed
+      RefreshQueuedGit(dir)
+    endif
     return
   endif
   var info: dict<any> = {
@@ -2173,7 +2208,35 @@ def OnGitInfo(ev: dict<any>)
     redrawstatus
     redrawtabline
   endif
-  RefreshQueuedGit(dir)
+  if !pushed
+    RefreshQueuedGit(dir)
+  endif
+enddef
+
+# A watch reply, or an unsolicited withdrawal carrying id 0.  Either way the
+# payload is the daemon's own account of what it is watching, and this client's
+# poll follows it: what the daemon reports, the timer does not ask for.
+def OnWatchReply(ev: dict<any>)
+  var path = get(ev, 'path', v:null)
+  var watching = get(ev, 'watching', v:null)
+  if type(path) != v:t_string || path ==# '' || type(watching) != v:t_bool
+    DebugLog('ignored malformed watch response')
+    return
+  endif
+  if has_key(s_git_watch_pending, path)
+    remove(s_git_watch_pending, path)
+  endif
+  if watching
+    s_git_watched[path] = true
+    return
+  endif
+  if has_key(s_git_watched, path)
+    remove(s_git_watched, path)
+  endif
+  s_git_watch_refused[path] = true
+  # The directory is back on the poll and nothing has reported it since the
+  # watch ended, so ask once now instead of waiting out an interval.
+  RequestGitDir(path)
 enddef
 
 def OnDaemonError(ev: dict<any>)
@@ -2227,6 +2290,8 @@ def OnDaemonEvent(ev: dict<any>)
     endif
   elseif ev.type ==# 'git_info'
     OnGitInfo(ev)
+  elseif ev.type ==# 'watch'
+    OnWatchReply(ev)
   elseif ev.type ==# 'error'
     OnDaemonError(ev)
   endif
@@ -2302,7 +2367,12 @@ def RequestGitDir(dir: string)
   endif
   if !SendReq(request)
     TakePending(id)
+    return
   endif
+  # Ask to be told about this directory only after asking what it looks like
+  # now: the answer to the question already in flight is the newer of the two,
+  # and a watch granted first would have its opening push overwritten by it.
+  MaybeWatch(dir)
 enddef
 
 # The daemon advertises 'git-status' on the handshake, so an older binary that
@@ -2326,6 +2396,37 @@ def WantFileStatus(): bool
   endtry
 enddef
 
+# Whether this client would rather be told than keep asking.  The option is
+# checked before the capability so a user can keep the poll on a filesystem
+# where notifications are unreliable — a network mount, a container bind mount
+# — without having to rebuild the daemon.
+def WantWatch(): bool
+  if !ConfBool('simpleline_git_watch', true)
+    return false
+  endif
+  try
+    return simpleline#core#HasCap('watch')
+  catch
+    return false
+  endtry
+enddef
+
+def MaybeWatch(dir: string)
+  if !WantWatch()
+    return
+  endif
+  if has_key(s_git_watched, dir) || has_key(s_git_watch_pending, dir)
+        \ || has_key(s_git_watch_refused, dir)
+    return
+  endif
+  var id = NextId()
+  # want_files travels with the watch: a push is not answering a git_info
+  # request, so there is no later request left to carry it.
+  if SendReq({type: 'watch', id: id, path: dir, want_files: WantFileStatus()})
+    s_git_watch_pending[dir] = true
+  endif
+enddef
+
 def FlushDaemonWaiters()
   var dirs = keys(s_daemon_waiting_dirs)
   s_daemon_waiting_dirs = {}
@@ -2346,7 +2447,14 @@ def RequestGitInfo()
 enddef
 
 def GitTimerCb(_id: number)
-  RequestGitInfo()
+  var dir = CurrentGitDir()
+  # The point of the whole feature: a directory the daemon reports on is not
+  # asked about.  Polling it anyway would spawn `git status` over the worktree
+  # every interval to learn what the daemon has already undertaken to say.
+  if has_key(s_git_watched, dir)
+    return
+  endif
+  RequestGitDir(dir)
 enddef
 
 def StopDaemon()
@@ -2611,6 +2719,13 @@ export def Health()
         \ .. '/' .. (executable('git') ? 'yes' : 'no')
   echo '  Git interval/timer: ' .. string(get(g:, 'simpleline_git_interval', 2000))
         \ .. '/' .. (s_git_timer == 0 ? 'stopped' : string(s_git_timer))
+        \ .. ' (this one ' .. (has_key(s_git_watched, CurrentGitDir())
+        \   ? 'watched' : 'polled') .. ')'
+  echo '  git watch: ' .. (ConfBool('simpleline_git_watch', true) ? 'on' : 'off')
+        \ .. '/' .. (WantWatch() ? 'negotiated' : 'unavailable')
+        \ .. ', ' .. len(s_git_watched) .. ' dir(s) watched'
+        \ .. (empty(s_git_watch_refused) ? ''
+        \   : ', ' .. len(s_git_watch_refused) .. ' refused')
   echo '  Git provider: ' .. GitProvider() .. ' (simplegit '
         \ .. (exists('*simplegit#StatusDict') ? 'available' : 'absent')
         \ .. ', this buffer: ' .. (empty(SimpleGitStatus()) ? 'daemon' : 'simplegit')
