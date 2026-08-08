@@ -85,8 +85,10 @@ Git 仍开启时才排队,显式停止不会留下任何东西。新增
   `DiffChange`/`DiffAdd`/`DiffDelete`/`Error`。当前 buffer 保持
   `SimpleTablineActive`:你在哪个 buffer 比它的 Git 状态更重要。
 - 标记进了 tabline 备忘键,图标也进了——它们是渲染输入,漏掉渲染输入正是这个
-  插件反复犯的那类错。每个 buffer 的标记按 "buffer + 文件名" 缓存,只在 Git
-  数据真的变了才丢弃;经过 symlink 打开的文件会退一步用 `resolve()` 再匹配。
+  插件反复犯的那类错。每个 buffer 的标记按 "仓库根 + buffer + 文件名" 缓存,
+  只在 Git 数据真的变了才丢弃;根必须进键,因为切到另一个仓库的 buffer 会换
+  一条缓存记录来作答,而这个过程不改动任何 payload。经过 symlink 打开的文件
+  会退一步用 `resolve()` 再匹配。
 - `:SimpleLineHealth` 增加一行:开关状态、能力是否协商成功、路径条数、是否
   截断、仓库根。"为什么没上色"是这个功能唯一的支持负担。
 

@@ -158,6 +158,67 @@ call assert_match('git file status: on/unavailable', execute('SimpleLineHealth')
 call simpleline#Stop()
 call delete(s:old)
 
+" ------------------------------------------------- two repositories at once ---
+
+" Marks answer for the repository the *current* buffer belongs to. Moving to a
+" buffer in another one changes which cache entry answers without changing any
+" payload, so a mark resolved against the previous root must not survive.
+" Two files over there, because the current buffer decides which repository
+" answers and always keeps SimpleTablineActive — it can never be the buffer
+" whose mark is under test.
+let s:other = resolve(tempname())
+call mkdir(s:other, 'p')
+call writefile(['x'], s:other . '/elsewhere.txt')
+call writefile(['x'], s:other . '/current.txt')
+
+" This daemon echoes the requested directory back as both path and repo_root,
+" and reports the same two names for either repository — so which of them can
+" actually be resolved is entirely a question of the root.
+let s:two = tempname()
+let s:vfmt = '{"type":"version","id":%s,"version":"test-daemon","protocol":2'
+      \ . ',"capabilities":{"git-status":true}}'
+let s:gfmt = '{"type":"git_info","id":%s,"path":"%s","repo_root":"%s"'
+      \ . ',"branch":"main","dirty":true,"added":0,"modified":2,"deleted":0'
+      \ . ',"conflicts":0,"stash":0,"operation":"","ahead":0,"behind":0'
+      \ . ',"is_git":true,"files":{"dirty.txt":"M","elsewhere.txt":"M"}'
+      \ . ',"files_truncated":false}'
+call writefile([
+      \ '#!/bin/sh',
+      \ 'while IFS= read -r line; do',
+      \ '  id=$(printf ''%s'' "$line" | sed -n ''s/.*"id":\([0-9][0-9]*\).*/\1/p'')',
+      \ '  p=$(printf ''%s'' "$line" | sed -n ''s/.*"path":"\([^"]*\)".*/\1/p'')',
+      \ '  case "$line" in',
+      \ '    *''"type":"version"''*) printf ' . shellescape(s:vfmt . '\n') . ' "$id" ;;',
+      \ '    *''"type":"git_info"''*) printf ' . shellescape(s:gfmt . '\n') . ' "$id" "$p" "$p" ;;',
+      \ '  esac',
+      \ 'done',
+      \ ], s:two, 'b')
+call setfperm(s:two, 'rwx------')
+
+let g:simpleline_daemon_path = s:two
+call simpleline#Enable()
+execute 'edit ' . fnameescape(s:other . '/elsewhere.txt')
+execute 'edit ' . fnameescape(s:other . '/current.txt')
+execute 'edit ' . fnameescape(s:repo . '/clean.txt')
+sleep 400m
+let s:in_repo = simpleline#Tabline()
+call assert_match('SimpleTablineGitModified#dirty.txt', s:in_repo,
+      \ 'the file inside the current repository is marked')
+call assert_notmatch('SimpleTablineGitModified#[^#]*elsewhere.txt', s:in_repo,
+      \ 'a file outside it is not, despite sharing the name in the payload')
+
+execute 'buffer ' . bufnr(s:other . '/current.txt')
+sleep 400m
+let s:in_other = simpleline#Tabline()
+call assert_match('SimpleTablineGitModified#[^#]*elsewhere.txt', s:in_other,
+      \ 'the other repository answers once its buffer is current')
+call assert_notmatch('SimpleTablineGitModified#dirty.txt', s:in_other,
+      \ 'a mark resolved against the previous root does not survive the move')
+
+call simpleline#Stop()
+call delete(s:two)
+call delete(s:other, 'rf')
+
 " ------------------------------------------------------ malformed payload ---
 
 " A non-string mark must be rejected by validation, leaving the previous cache

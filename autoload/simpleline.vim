@@ -705,7 +705,12 @@ enddef
 # documented notifications are wired to this in the SimpleLineAutoUpdate group.
 export def RefreshDiagnostics()
   s_diag_tick += 1
-  redrawstatus
+  # Providers call this from their own autocommands, which can fire in states
+  # where a redraw is refused; the invalidation above is the part that matters.
+  try
+    redrawstatus
+  catch
+  endtry
 enddef
 
 def ResetRenderCaches()
@@ -1067,7 +1072,9 @@ enddef
 # bufnr (as a string) -> 'M' / 'A' / 'D' / 'U', for the repository the current
 # buffer belongs to.  Buffers in another repository simply carry no mark.
 def TablineGitMarks(all: list<dict<any>>): dict<string>
-  if !TabConfBool('simpletabline_git_status', true)
+  if !TabConfBool('simpletabline_git_status', true) || empty(s_git_cache)
+    # Nothing has ever answered, so skip the path work entirely — this runs on
+    # every redraw, including for everyone who keeps Git turned off.
     return {}
   endif
   var info = get(s_git_cache, CurrentGitDir(), {})
@@ -1086,7 +1093,11 @@ def TablineGitMarks(all: list<dict<any>>): dict<string>
     if name ==# ''
       continue
     endif
-    var key = b.bufnr .. "\x01" .. name
+    # The root is part of the key, not just the tick: moving to a buffer in
+    # another repository changes which cache entry answers without changing
+    # any payload, and a mark resolved against the previous root would
+    # otherwise survive the move.
+    var key = root .. "\x01" .. b.bufnr .. "\x01" .. name
     var mark: string
     if has_key(s_git_mark_cache, key)
       mark = s_git_mark_cache[key]
