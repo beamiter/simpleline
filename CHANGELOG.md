@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased - 2026-08-08
+
+### CI:MSRV 钉住的版本与声明的版本对不上
+
+- `dtolnay/rust-toolchain` 一直钉在 1.85.0,而 `Cargo.toml` 声明的是
+  `rust-version = "1.88"`。cargo 把"工具链比声明的更旧"当硬错误,所以每次
+  push,MSRV 作业都在编译第一个 crate 之前就失败——CI 红了整整一个版本周期,
+  红到没人再看。现在钉 1.88.0。
+- 新增一步:从 `Cargo.toml` 里抽出 `rust-version`,与实际 `rustc --version`
+  比对,不一致就报错。action 引用必须是字面量,所以这里只能"派生断言",不能
+  "派生取值";但至少两者再分叉时会当场说清楚,而不是丢一屏 trait 解析错误。
+- CI 不再手抄 Makefile 的子集:`make defcompile` 与 `make vim-core` 两步删掉了,
+  它们本来就在 `make check` 里。门禁范围以 Makefile 为唯一事实来源,否则以后
+  往 `check` 里加的目标会在 CI 里被静默跳过。
+
 ## Unreleased - 2026-08-05
 
 ### 全套统一

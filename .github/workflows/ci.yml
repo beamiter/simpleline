@@ -13,12 +13,32 @@ jobs:
   # newly used language feature can quietly break it, because every other job
   # runs on stable.  This is the check that caught `ignore` pulling in
   # let-chains and two crates whose own sources had outgrown their declared
-  # MSRV.  Keep the toolchain here in step with rust-version in Cargo.toml.
+  # MSRV.
   msrv:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.85.0
+      # An action reference has to be a literal, so this one number cannot be
+      # read out of Cargo.toml.  The step after it derives the expectation from
+      # the source and fails loudly when the two disagree: this pin sat at
+      # 1.85.0 against a declared rust-version of 1.88 for a whole release, and
+      # because cargo treats a too-old toolchain as a hard error, every run
+      # aborted before compiling a single crate — a red CI nobody could read.
+      - uses: dtolnay/rust-toolchain@1.88.0
+      - name: Toolchain pin agrees with rust-version in Cargo.toml
+        run: |
+          declared="$(sed -n 's/^rust-version *= *"\([0-9][0-9.]*\)".*/\1/p' Cargo.toml)"
+          test -n "$declared"
+          installed="$(rustc --version | cut -d' ' -f2)"
+          case "$installed" in
+            "$declared"|"$declared".*) ;;
+            *)
+              echo "::error::Cargo.toml declares rust-version $declared;" \
+                   "the pinned toolchain is $installed. Update the" \
+                   "dtolnay/rust-toolchain pin above."
+              exit 1
+              ;;
+          esac
       - name: Build on the declared minimum supported Rust
         run: cargo check --all-targets --locked
   test:
@@ -37,6 +57,10 @@ jobs:
           rustup update stable
           rustup default stable
 
+      # The Makefile is the sole source of truth for what the gate runs: `check`
+      # already covers core-verify, the Rust suite, every tests/vim file,
+      # defcompile and vim-core.  Hand-listing a subset here is how a workflow
+      # ends up silently skipping the targets added after it was written.
       - name: Run quality gate
         run: make check
 
@@ -52,9 +76,3 @@ jobs:
             src/simpleline/simpleline_daemon.rs)"
           test -n "$expected"
           grep -F "\"protocol\":$expected" <<<"$response"
-
-      - name: Compile every Vim9 def (lazy compilation hides cold-branch errors)
-        run: make defcompile
-
-      - name: simplecore supervisor regression suite
-        run: make vim-core
