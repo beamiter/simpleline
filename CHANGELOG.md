@@ -2,6 +2,33 @@
 
 ## Unreleased - 2026-08-08
 
+### 性能:statusline 的每帧开销
+
+`'statusline'` 是 `%!` 表达式,每次重绘都重建一遍——也就是每次光标移动。里面
+有两段在做真活:
+
+- 搜索计数每帧都调 `searchcount({maxcount: 99, timeout: 20})`。这是每个按键
+  20ms 的预算,哪怕光标和模式一个都没动。现在按 "buffer + `b:changedtick` +
+  `@/` + 光标位置 + `v:hlsearch` + `'ignorecase'` + `'smartcase'` + 两个新选项"
+  做备忘,状态没变就是一次字符串比较。备忘键每次从头重建:漏掉一个输入应该
+  表现为键不匹配,而不是悄悄复用旧值——计数陈旧比计数慢更糟。
+- 诊断段每帧都要做一遍 `exists()` 探测加一次 provider 调用。现在按
+  "buffer + `b:changedtick` + `b:coc_diagnostic_info` + provider tick" 做备忘。
+  coc.nvim 把结果写在 buffer 变量里,读一次字典比调一次函数便宜得多,所以它
+  的精确输入直接进键;ALE 与 vim-lsp 要调函数,只能靠它们自己的通知失效。
+
+- 新增 `g:simpleline_search_maxcount`(默认 99,0 为不限)与
+  `g:simpleline_search_timeout`(默认 20ms,0 为不设超时)。超出 maxcount 时
+  显示 `1/99+` 而不是把 `maxcount + 1` 当成真实总数。
+- 一次超时之后,该 buffer 上的该模式不再重试:一个病态模式退化一次,而不是
+  每帧退化一次。换模式或换 buffer 会重新获得机会。
+- 诊断结果是异步到达的,不会动 `b:changedtick`,所以新增监听三个 provider 的
+  公开通知:`User CocDiagnosticChange`、`ALELintPost`、`ALEJobStarted`、
+  `lsp_diagnostics_updated`。
+- `:SimpleLineDebug` 报告两个缓存的命中率——tabline 备忘当初也是这样自证的。
+- 新增 `tests/vim/render_cache.vim`:逐项验证"状态没变必须命中"与"每个输入
+  变化必须未命中且值正确"。
+
 ### CI:MSRV 钉住的版本与声明的版本对不上
 
 - `dtolnay/rust-toolchain` 一直钉在 1.85.0,而 `Cargo.toml` 声明的是

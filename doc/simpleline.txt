@@ -119,6 +119,8 @@ g:simpleline_show_fileformat          1
 g:simpleline_show_position            1 (active also shows percentage)
 g:simpleline_show_lsp                 1
 g:simpleline_show_search              1 (current/total while v:hlsearch)
+g:simpleline_search_maxcount          99 (0 counts every match)
+g:simpleline_search_timeout           20 ms (0 or less never gives up)
 g:simpleline_show_recording           1 (REC @reg while recording)
 g:simpleline_show_diagnostics         1 (E:n W:n from coc/ALE/vim-lsp)
 g:simpleline_filename_mode            'native' (native, tail, rel, abbr, abs)
@@ -136,6 +138,29 @@ g:simpleline_enable_default_mappings  1
 When statusline management is enabled, Simpleline raises 'laststatus' to 2 if
 needed and restores the old value on disable. Compact mode keeps the branch and
 position while hiding file metadata, Git counts, and ahead/behind.
+
+REDRAW CACHES ~
+                                                 *simpleline-redraw-caches*
+'statusline' is a %! expression, so the whole line is rebuilt on every redraw
+— that is, on every cursor movement. Two segments used to do real work there
+and are now memoized:
+
+- The search count is cached on everything searchcount() reads: the buffer,
+  b:changedtick, @/, the cursor position, v:hlsearch, 'ignorecase',
+  'smartcase', and the two budget options above. A recompute that exceeds
+  g:simpleline_search_timeout is reported as no count, and that pattern is not
+  retried in that buffer — one pathological pattern degrades once instead of
+  on every frame. Clear the state with :SimpleLineReload.
+- The diagnostics counts are cached on the buffer, b:changedtick and
+  b:coc_diagnostic_info (coc.nvim publishes into a buffer variable, so its
+  exact input is cheap enough to keep in the key). ALE and vim-lsp cost a
+  function call and are not in the key; they publish asynchronously without
+  touching b:changedtick, so Simpleline listens for User CocDiagnosticChange,
+  ALELintPost, ALEJobStarted and lsp_diagnostics_updated. A provider that
+  publishes none of these can show a count that is stale until the next edit
+  or buffer switch.
+
+:SimpleLineDebug reports the hit rate of both caches.
 
 GIT ~
 g:simpleline_git_enabled              1

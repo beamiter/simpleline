@@ -99,6 +99,8 @@ Set options before Simpleline loads. After changing a visual/runtime option, run
 | `g:simpleline_show_position` | `1` | Show line/column; the active line also shows percentage. |
 | `g:simpleline_show_lsp` | `1` | Show the compatibility provider described below. |
 | `g:simpleline_show_search` | `1` | Show `current/total` search matches while `v:hlsearch` is on. |
+| `g:simpleline_search_maxcount` | `99` | `searchcount()` match limit; exceeding it renders `1/99+`. `0` counts every match. |
+| `g:simpleline_search_timeout` | `20` | `searchcount()` budget in ms. A pattern that exceeds it is not retried in that buffer. `0` never gives up. |
 | `g:simpleline_show_recording` | `1` | Show `REC @reg` while recording a macro. |
 | `g:simpleline_show_diagnostics` | `1` | Show error/warning counts from coc.nvim, ALE, or vim-lsp. |
 | `g:simpleline_filename_mode` | `'native'` | Statusline filename: `'native'`, `'tail'`, `'rel'`, `'abbr'`, or `'abs'`. |
@@ -113,6 +115,8 @@ Example icon override:
 ```vim
 let g:simpleline_filetype_icons = {'python': 'Py', 'text': ''}
 ```
+
+The statusline is a `%!` expression, so it is rebuilt on every redraw — every cursor movement. The two segments that used to do real work there are memoized: the search count on everything `searchcount()` reads (buffer, `b:changedtick`, `@/`, cursor position, `v:hlsearch`, `'ignorecase'`, `'smartcase'`, and the two budget options), and the diagnostics counts on the buffer, `b:changedtick` and `b:coc_diagnostic_info`, plus the providers' own notifications (`User CocDiagnosticChange`, `ALELintPost`, `ALEJobStarted`, `lsp_diagnostics_updated`) for ALE and vim-lsp, which cost a function call. `:SimpleLineDebug` reports both hit rates. A search pattern that exceeds `g:simpleline_search_timeout` is reported as no count and is not retried in that buffer, so one pathological pattern costs one slow redraw instead of every redraw.
 
 ### Git
 

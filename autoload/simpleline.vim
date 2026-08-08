@@ -89,6 +89,11 @@ def ConfBool(name: string, default_val: bool): bool
   return default_val
 enddef
 
+def ConfNumber(name: string, default_val: number): number
+  var value = get(g:, name, default_val)
+  return type(value) == v:t_number ? value : default_val
+enddef
+
 def SeparatorStyle(): string
   var value = get(g:, 'simpleline_separator', 'arrow')
   if type(value) != v:t_string || index(['arrow', 'round', 'plain'], value) < 0
@@ -429,72 +434,191 @@ def RecordingStr(): string
   return reg ==# '' ? '' : 'REC @' .. reg
 enddef
 
+# ----------- Search count -----------
+# 'statusline' is a %! expression, so this runs on every redraw — that is, on
+# every cursor movement.  searchcount() re-walks the buffer, and its timeout
+# was being spent per keystroke even when nothing it reads had moved.  The memo
+# is keyed on the complete input set, and rebuilt from scratch on every call:
+# a stale count is worse than a slow one, so a forgotten input must show up as
+# a wrong key, never as a silently reused value.
+var s_search_key: string = ''
+var s_search_value: string = ''
+var s_search_hits: number = 0
+var s_search_misses: number = 0
+# A pattern that blows the timeout once will blow it again on the next frame,
+# which is how one pathological search makes the whole editor feel broken.
+# Remember the (buffer, pattern) pairs that timed out and stop asking; a new
+# pattern or a new buffer gets a fresh chance.
+var s_search_slow: dict<bool> = {}
+
 def SearchStr(): string
   if !ConfBool('simpleline_show_search', true) || !v:hlsearch
         \ || !exists('*searchcount')
     return ''
   endif
+  var bufnum = bufnr('%')
+  var pattern = @/
+  var maxcount = ConfNumber('simpleline_search_maxcount', 99)
+  var timeout = ConfNumber('simpleline_search_timeout', 20)
+  var key = join([
+    string(bufnum),
+    pattern,
+    string(line('.')),
+    string(col('.')),
+    string(getbufvar(bufnum, 'changedtick', 0)),
+    string(v:hlsearch),
+    string(&ignorecase),
+    string(&smartcase),
+    string(maxcount),
+    string(timeout),
+  ], "\x01")
+  if key ==# s_search_key
+    s_search_hits += 1
+    return s_search_value
+  endif
+  s_search_misses += 1
+  s_search_key = key
+  s_search_value = ''
+
+  var slow_key = bufnum .. "\x01" .. pattern
+  if has_key(s_search_slow, slow_key)
+    return ''
+  endif
+
   var result: dict<any>
   try
-    result = searchcount({maxcount: 99, timeout: 20})
+    result = searchcount({maxcount: maxcount, timeout: timeout})
   catch
     return ''
   endtry
+  var incomplete = get(result, 'incomplete', 0)
+  if incomplete == 1
+    # Timed out: the count is unusable anyway, so stop paying for it.
+    if len(s_search_slow) >= 64
+      s_search_slow = {}
+    endif
+    s_search_slow[slow_key] = true
+    DebugLog('searchcount() timed out after ' .. timeout
+          \ .. 'ms; the count is disabled for this pattern')
+    return ''
+  endif
   var total = get(result, 'total', 0)
   if type(total) != v:t_number || total <= 0
     return ''
   endif
   var current = get(result, 'current', 0)
-  var total_txt = get(result, 'incomplete', 0) == 2 ? '99+' : string(total)
-  return current .. '/' .. total_txt
+  # An exceeded maxcount reports total as maxcount + 1; say so rather than
+  # pretending the inflated number is a count.
+  var total_txt = incomplete == 2 && maxcount > 0
+        \ ? maxcount .. '+' : string(total)
+  s_search_value = current .. '/' .. total_txt
+  return s_search_value
 enddef
 
+# ----------- Diagnostics -----------
 def DiagCount(value: any): number
   return type(value) == v:t_number && value > 0 ? value : 0
 enddef
 
 # Diagnostics from the first detected provider: coc.nvim, ALE, then vim-lsp.
-def DiagnosticCounts(): dict<number>
+# The provider that answered is returned with its counts so that the memo and
+# :SimpleLineHealth can never disagree about who is being asked.
+def DiagnosticProbe(): dict<any>
   var coc = getbufvar(bufnr('%'), 'coc_diagnostic_info', {})
   if type(coc) == v:t_dict && !empty(coc)
-    return {
+    return {provider: 'coc', counts: {
       error: DiagCount(get(coc, 'error', 0)),
       warning: DiagCount(get(coc, 'warning', 0)),
-    }
+    }}
   endif
   if exists('*ale#statusline#Count')
     try
       var counts = ale#statusline#Count(bufnr('%'))
-      return {
+      return {provider: 'ale', counts: {
         error: DiagCount(get(counts, 'error', 0)) + DiagCount(get(counts, 'style_error', 0)),
         warning: DiagCount(get(counts, 'warning', 0)) + DiagCount(get(counts, 'style_warning', 0)),
-      }
+      }}
     catch
     endtry
   endif
   if exists('*lsp#get_buffer_diagnostics_counts')
     try
       var counts = lsp#get_buffer_diagnostics_counts()
-      return {
+      return {provider: 'vim-lsp', counts: {
         error: DiagCount(get(counts, 'error', 0)),
         warning: DiagCount(get(counts, 'warning', 0)),
-      }
+      }}
     catch
     endtry
   endif
-  return {error: 0, warning: 0}
+  return {provider: 'none', counts: {error: 0, warning: 0}}
+enddef
+
+# The probe above ran on every redraw: an exists() sweep plus a provider call
+# per cursor movement.  Its result only changes when the buffer changes or when
+# the provider says so, so memoize on exactly that.
+var s_diag_provider: string = 'none'
+var s_diag_tick: number = 0
+var s_diag_key: string = ''
+var s_diag_value: dict<number> = {error: 0, warning: 0}
+var s_diag_hits: number = 0
+var s_diag_misses: number = 0
+
+def DiagnosticCounts(): dict<number>
+  var bufnum = bufnr('%')
+  # coc.nvim publishes into a buffer variable rather than through a function,
+  # so its exact input is one dictionary lookup — cheap enough to keep in the
+  # key, which makes the memo exact for the most common provider.  ALE and
+  # vim-lsp cost a function call, so they invalidate through their events.
+  var key = printf('%d:%d:%d:%s', bufnum,
+        \ getbufvar(bufnum, 'changedtick', 0), s_diag_tick,
+        \ string(getbufvar(bufnum, 'coc_diagnostic_info', {})))
+  if key ==# s_diag_key
+    s_diag_hits += 1
+    return s_diag_value
+  endif
+  s_diag_misses += 1
+  s_diag_key = key
+  var probe = DiagnosticProbe()
+  s_diag_provider = probe.provider
+  s_diag_value = probe.counts
+  return s_diag_value
 enddef
 
 def DiagProviderName(): string
-  var coc = getbufvar(bufnr('%'), 'coc_diagnostic_info', {})
-  if type(coc) == v:t_dict && !empty(coc)
-    return 'coc'
-  elseif exists('*ale#statusline#Count')
-    return 'ale'
-  elseif exists('*lsp#get_buffer_diagnostics_counts')
-    return 'vim-lsp'
-  endif
-  return 'none'
+  return DiagnosticProbe().provider
+enddef
+
+# Providers publish results asynchronously, without touching b:changedtick, so
+# nothing else in the memo key moves when new diagnostics arrive.  Their
+# documented notifications are wired to this in the SimpleLineAutoUpdate group.
+export def RefreshDiagnostics()
+  s_diag_tick += 1
+  redrawstatus
+enddef
+
+def ResetRenderCaches()
+  s_search_key = ''
+  s_search_value = ''
+  s_search_slow = {}
+  s_search_hits = 0
+  s_search_misses = 0
+  s_diag_key = ''
+  s_diag_value = {error: 0, warning: 0}
+  s_diag_provider = 'none'
+  s_diag_hits = 0
+  s_diag_misses = 0
+enddef
+
+# Hit counts for the two per-redraw memos, so the win is observable rather
+# than asserted; :SimpleLineDebug renders them.
+export def CacheStats(): dict<number>
+  return {
+    search_hits: s_search_hits,
+    search_misses: s_search_misses,
+    diag_hits: s_diag_hits,
+    diag_misses: s_diag_misses,
+  }
 enddef
 
 # ----------- Highlight groups -----------
@@ -1901,6 +2025,7 @@ export def Enable()
 
   SetupSeparators()
   SetupHighlights()
+  ResetRenderCaches()
   try
     g:SimpleTablineApplyHL()
   catch
@@ -1943,6 +2068,13 @@ export def Enable()
     autocmd BufEnter,BufWritePost,DirChanged,FocusGained * simpleline#RequestGitRefresh()
     autocmd ColorScheme * simpleline#ResetHighlights()
     autocmd VimResized * redrawtabline | redrawstatus
+    # The diagnostics memo is keyed on the buffer and its changedtick, neither
+    # of which moves when a linter or language server finishes in the
+    # background.  These are the three supported providers' documented public
+    # notifications; without them a memoized count could sit stale until the
+    # buffer was edited or left.
+    autocmd User CocDiagnosticChange,ALELintPost,ALEJobStarted,lsp_diagnostics_updated
+          \ simpleline#RefreshDiagnostics()
     # Repaint the recording indicator immediately where Vim supports the events.
     if exists('##RecordingEnter')
       autocmd RecordingEnter,RecordingLeave * redrawstatus
@@ -2054,6 +2186,7 @@ export def Reload()
   else
     SetupSeparators()
     SetupHighlights()
+    ResetRenderCaches()
   endif
 enddef
 
@@ -2102,7 +2235,20 @@ export def Health()
   endif
 enddef
 
+def CacheRate(hits: number, misses: number): string
+  var total = hits + misses
+  return total == 0 ? 'n/a' : (hits * 100 / total) .. '%'
+enddef
+
 export def DebugStatus()
   Health()
+  # Both memos exist to keep work out of the redraw path, so report how often
+  # they actually avoid it — the tabline memo was justified the same way.
+  echo '  search cache: ' .. s_search_hits .. ' hit/' .. s_search_misses
+        \ .. ' miss (' .. CacheRate(s_search_hits, s_search_misses) .. '), '
+        \ .. len(s_search_slow) .. ' pattern(s) disabled after a timeout'
+  echo '  diagnostics cache: ' .. s_diag_hits .. ' hit/' .. s_diag_misses
+        \ .. ' miss (' .. CacheRate(s_diag_hits, s_diag_misses) .. '), provider '
+        \ .. s_diag_provider
   echo '  git_cache: ' .. string(s_git_cache)
 enddef

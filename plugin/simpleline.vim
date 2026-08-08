@@ -44,6 +44,12 @@ g:simpleline_show_fileformat = ConfigFlag('simpleline_show_fileformat', 1)
 g:simpleline_show_position = ConfigFlag('simpleline_show_position', 1)
 g:simpleline_show_lsp = ConfigFlag('simpleline_show_lsp', 1)
 g:simpleline_show_search = ConfigFlag('simpleline_show_search', 1)
+# searchcount() budget for the search segment. Its result is memoized on every
+# input searchcount() reads, so these only bound the cost of a real recompute:
+# maxcount 0 counts every match, timeout 0 never gives up — and can therefore
+# stall a redraw on a pathological pattern.
+g:simpleline_search_maxcount = get(g:, 'simpleline_search_maxcount', 99)
+g:simpleline_search_timeout = get(g:, 'simpleline_search_timeout', 20)
 g:simpleline_show_recording = ConfigFlag('simpleline_show_recording', 1)
 g:simpleline_show_diagnostics = ConfigFlag('simpleline_show_diagnostics', 1)
 g:simpleline_filetype_icons = get(g:, 'simpleline_filetype_icons', {})
