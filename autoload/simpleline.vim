@@ -215,16 +215,111 @@ def CurrentGitDir(): string
   return normalized
 enddef
 
+# ----------- simplegit hand-off -----------
+# simplegit publishes a per-buffer {head, ahead, behind, added, changed,
+# removed} dictionary — b:simplegit_status_dict, plus simplegit#StatusDict()
+# for the same data — kept fresh by its own daemon from the hunks that drive
+# its sign column.  Where it is installed there is no reason for two daemons to
+# run `git status` over the same worktree, so the repository facts come from it
+# and Simpleline's own query stays as the fallback for everyone else.
+#
+# Only the repository-level facts are taken.  simplegit's added/changed/removed
+# are *line* counts for one buffer against the index; Simpleline's [+n ~n -n]
+# are *file* counts for the whole worktree.  Rendering one as the other would
+# silently change what the segment means, so the file counts keep coming from
+# the daemon and the line counts get their own opt-in segment.
+def GitProvider(): string
+  var value = get(g:, 'simpleline_git_provider', 'auto')
+  if type(value) != v:t_string || index(['auto', 'daemon', 'simplegit'], value) < 0
+    return 'auto'
+  endif
+  return value
+enddef
+
+def NonNegative(entry: dict<any>, name: string): number
+  var value = get(entry, name, 0)
+  return type(value) == v:t_number && value > 0 ? value : 0
+enddef
+
+# {} when simplegit is absent, silent, or has nothing to say about this buffer.
+def SimpleGitStatus(): dict<any>
+  if GitProvider() ==# 'daemon'
+    return {}
+  endif
+  # The buffer variable is simplegit's documented consumer contract and costs
+  # one lookup; the accessor is the fallback for a buffer it has not published
+  # yet.  Neither dispatches nor blocks, so both are safe inside a redraw.
+  # exists() does not source an autoload script, so the accessor becomes
+  # visible only once simplegit has run — which is also the only time it has
+  # anything to report, and until then the buffer variable is absent too.
+  var dict: any = getbufvar(bufnr('%'), 'simplegit_status_dict', {})
+  if type(dict) != v:t_dict || empty(dict)
+    if !exists('*simplegit#StatusDict')
+      return {}
+    endif
+    try
+      dict = simplegit#StatusDict()
+    catch
+      DebugLog('simplegit#StatusDict() threw: ' .. v:exception)
+      return {}
+    endtry
+    if type(dict) != v:t_dict
+      return {}
+    endif
+  endif
+  var head = get(dict, 'head', '')
+  if type(head) != v:t_string || head ==# ''
+    # simplegit reports '' both for "no repository" and for "not resolved
+    # yet", so an empty head is no evidence at all: fall back to the daemon.
+    return {}
+  endif
+  return {
+    branch: head,
+    ahead: NonNegative(dict, 'ahead'),
+    behind: NonNegative(dict, 'behind'),
+    added: NonNegative(dict, 'added'),
+    changed: NonNegative(dict, 'changed'),
+    removed: NonNegative(dict, 'removed'),
+  }
+enddef
+
+# `+12 ~3 -1` for the current file: added/changed/removed *lines* against the
+# index, which is the one thing simplegit knows and the daemon does not.
+def HunkStr(): string
+  if !ConfBool('simpleline_show_hunks', false) || IsCompact()
+    return ''
+  endif
+  var sg = SimpleGitStatus()
+  if empty(sg)
+    return ''
+  endif
+  var parts: list<string> = []
+  for [key, marker] in [['added', '+'], ['changed', '~'], ['removed', '-']]
+    if sg[key] > 0
+      parts->add(marker .. sg[key])
+    endif
+  endfor
+  return join(parts, ' ')
+enddef
+
 def GitStr(): string
   if !ConfBool('simpleline_git_enabled', true)
     return ''
   endif
   var dir = CurrentGitDir()
   var info = get(s_git_cache, dir, {})
-  if empty(info) || !get(info, 'is_git', false)
-    return ''
+  var has_daemon_info = !empty(info) && get(info, 'is_git', false)
+  if GitProvider() ==# 'simplegit'
+    info = {}
+    has_daemon_info = false
   endif
-  var branch = get(info, 'branch', '')
+  var sg = SimpleGitStatus()
+  # Branch and ahead/behind describe the repository, so whichever source knows
+  # the branch answers for both.  Everything after them still comes from the
+  # daemon: it is the only side that counts files, conflicts and stashes.
+  var branch = empty(sg)
+        \ ? (has_daemon_info ? get(info, 'branch', '') : '')
+        \ : sg.branch
   if branch ==# ''
     return ''
   endif
@@ -238,8 +333,9 @@ def GitStr(): string
     # an in-progress rebase or merge is much costlier than one short segment.
     parts->add(RenderEscape(operation))
   endif
-  var ahead = IsCompact() ? 0 : get(info, 'ahead', 0)
-  var behind = IsCompact() ? 0 : get(info, 'behind', 0)
+  var counter = empty(sg) ? info : sg
+  var ahead = IsCompact() ? 0 : get(counter, 'ahead', 0)
+  var behind = IsCompact() ? 0 : get(counter, 'behind', 0)
   if ahead > 0
     parts->add('+' .. ahead)
   endif
@@ -662,6 +758,9 @@ def SetupHighlights()
   # Git
   highlight default SimpleLineGit       guibg=#3e4452 guifg=#e5c07b ctermfg=180 ctermbg=238
 
+  # Per-file hunk counts from simplegit (added/changed/removed lines)
+  highlight default SimpleLineHunks     guibg=#3e4452 guifg=#98c379 ctermfg=114 ctermbg=238
+
   # LSP (simplecc)
   highlight default SimpleLineLSP       guibg=#3e4452 guifg=#56b6c2 ctermfg=73 ctermbg=238
 
@@ -703,6 +802,14 @@ export def ActiveStatusline(): string
   var git = GitStr()
   if git !=# ''
     s ..= '%#SimpleLineGit# ' .. git .. ' '
+  endif
+
+  # Per-file hunk counts, when simplegit is there to provide them.  They sit in
+  # their own group next to the repository segment precisely because they count
+  # something else: lines in this file, not files in the worktree.
+  var hunks = HunkStr()
+  if hunks !=# ''
+    s ..= '%#SimpleLineHunks# ' .. hunks .. ' '
   endif
 
   # Diagnostics (coc.nvim / ALE / vim-lsp)
@@ -2096,6 +2203,9 @@ export def Enable()
     # buffer was edited or left.
     autocmd User CocDiagnosticChange,ALELintPost,ALEJobStarted,lsp_diagnostics_updated
           \ simpleline#RefreshDiagnostics()
+    # simplegit fires this whenever the buffer's status dictionary changes; it
+    # is what makes the handed-off branch appear without waiting for a poll.
+    autocmd User SimpleGitUpdate redrawstatus
     # Repaint the recording indicator immediately where Vim supports the events.
     if exists('##RecordingEnter')
       autocmd RecordingEnter,RecordingLeave * redrawstatus
@@ -2229,6 +2339,9 @@ export def Health()
         \ .. '/' .. (executable('git') ? 'yes' : 'no')
   echo '  Git interval/timer: ' .. string(get(g:, 'simpleline_git_interval', 2000))
         \ .. '/' .. (s_git_timer == 0 ? 'stopped' : string(s_git_timer))
+  echo '  Git provider: ' .. GitProvider() .. ' (simplegit '
+        \ .. (exists('*simplegit#StatusDict') ? 'available' : 'absent')
+        \ .. ', this buffer: ' .. (empty(SimpleGitStatus()) ? 'daemon' : 'simplegit') .. ')'
   var h = simpleline#core#Health()
   echo '  daemon: ' .. (daemon ==# '' ? 'not found' : daemon)
   echo '  daemon running: ' .. (h.running ? 'yes' : 'no')

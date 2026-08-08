@@ -170,6 +170,8 @@ g:simpleline_git_enabled              1
 g:simpleline_git_interval             2000 ms; minimum 250; 0 is event-only
 g:simpleline_git_show_status          1
 g:simpleline_git_show_operation       1 (show REBASE/MERGE/etc.)
+g:simpleline_git_provider             'auto' ('daemon', 'simplegit')
+g:simpleline_show_hunks               0 (per-file +/~/- lines from simplegit)
 g:simpleline_daemon_path              '' (search runtimepath/lib)
 
 The Git segment shows the branch, ahead/behind, added/modified/deleted
@@ -203,6 +205,29 @@ INTEGRATIONS                                         *simpleline-integrations*
 
 When simpletree#GetRoot() exists it supplies the path root. Otherwise cwd is
 used when g:simpletabline_fallback_cwd_root is enabled.
+
+                                                       *simpleline-simplegit*
+simplegit publishes b:simplegit_status_dict — {head, ahead, behind, added,
+changed, removed} — and simplegit#StatusDict() for the same data. When it is
+installed, Simpleline takes the branch and ahead/behind from it rather than
+having a second daemon run `git status` over the same worktree; its own daemon
+remains the fallback and keeps supplying the file counts, conflicts, stash and
+in-progress operation, which simplegit does not report. An empty head means
+"not resolved yet" as much as "no repository", so it falls back rather than
+blanking the segment. Simpleline redraws on User SimpleGitUpdate.
+
+g:simpleline_git_provider selects the source:
+
+  'auto'       (default) prefer simplegit, fall back to the daemon
+  'daemon'     ignore simplegit entirely
+  'simplegit'  ignore the daemon entirely (no file counts, conflicts,
+               stash or operation, since only the daemon reports those)
+
+g:simpleline_show_hunks (default 0) adds a separate SimpleLineHunks segment
+with simplegit's added/changed/removed *lines* for the current file, for
+example `+12 ~3 -1`. It is off by default because it looks like the Git
+segment's [+n ~n -n], which counts *files* in the worktree instead. It hides
+in compact windows and renders nothing without simplegit.
 
 A non-empty g:simplecc_status string is shown as a compatibility LSP/provider
 segment. It is escaped and rendered literally.

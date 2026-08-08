@@ -126,6 +126,8 @@ The statusline is a `%!` expression, so it is rebuilt on every redraw — every 
 | `g:simpleline_git_interval` | `2000` | Poll interval in ms (minimum 250); `0` is event-only. |
 | `g:simpleline_git_show_status` | `1` | Show added/modified/deleted counts. |
 | `g:simpleline_git_show_operation` | `1` | Show an in-progress rebase/merge/cherry-pick/revert/bisect/am operation. |
+| `g:simpleline_git_provider` | `'auto'` | Branch source: `'auto'` prefers simplegit and falls back to the daemon, `'daemon'` ignores simplegit, `'simplegit'` ignores the daemon. |
+| `g:simpleline_show_hunks` | `0` | Show simplegit's added/changed/removed **lines** for the current file in their own segment. |
 | `g:simpleline_daemon_path` | `''` | Executable override; otherwise search `runtimepath/lib`. |
 
 Refreshes are also triggered by buffer entry/write, directory changes, and focus changes. The client keeps one in-flight request per directory. The daemon runs one porcelain-v2 Git command per refresh, limits concurrency to four, and times out a query after five seconds. It reads Git's operation sentinel files directly, so operation detection does not add another process. Directory symlinks are resolved before walking for `.git`; if the physical path cannot be resolved, the operation is omitted rather than borrowed from a lexical parent repository. Unmerged files render as `!n` and stashes as `$n`; both stay out of the added/modified/deleted bracket. Operations and conflicts remain visible in compact windows.
@@ -168,6 +170,7 @@ The legacy `:BufferJump1` … `:BufferJump0` commands remain available.
 ## Integrations and themes
 
 - If `simpletree#GetRoot()` exists, its root is used for relative tabline paths; otherwise cwd is used when enabled.
+- If simplegit is installed it publishes `b:simplegit_status_dict` (`{head, ahead, behind, added, changed, removed}`) and `simplegit#StatusDict()`. Simpleline then takes the branch and ahead/behind from it instead of letting a second daemon run `git status` over the same worktree; its own daemon stays as the fallback and keeps supplying the file counts, conflicts, stash and in-progress operation, which simplegit does not report. An empty head means "not resolved yet" as much as "no repository", so it falls back rather than blanking the segment, and Simpleline redraws on `User SimpleGitUpdate`. Choose the source with `g:simpleline_git_provider`; add simplegit's per-file line counts as their own segment with `g:simpleline_show_hunks`.
 - `g:simpleline_filename_mode` leaves Vim's `%f` behavior untouched by default.
   The explicit `rel` and `abbr` modes use SimpleTree's current root when one is
   already available, otherwise the current window's cwd (including `:lcd`);

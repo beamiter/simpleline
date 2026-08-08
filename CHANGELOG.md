@@ -29,6 +29,26 @@
 - 新增 `tests/vim/render_cache.vim`:逐项验证"状态没变必须命中"与"每个输入
   变化必须未命中且值正确"。
 
+### 新增:接住 simplegit 的 statusline API
+
+simplegit 现在发布 `b:simplegit_status_dict`(`{head, ahead, behind, added,
+changed, removed}`)和 `simplegit#StatusDict()`。装了它的话,没有理由让两个
+daemon 对同一个 worktree 各跑一遍 `git status`:
+
+- 分支与 ahead/behind 改从 simplegit 拿;自己的 daemon 仍然是 fallback,
+  并且继续负责文件计数、冲突、stash 和进行中的 operation——这些 simplegit
+  不报。`head` 为空既可能是"不在仓库里"也可能是"还没解析出来",不构成证据,
+  所以此时回落到 daemon,而不是把段位清空。
+- 新增 `g:simpleline_git_provider`:`'auto'`(默认,优先 simplegit)、
+  `'daemon'`(完全忽略 simplegit)、`'simplegit'`(完全忽略自己的 daemon)。
+- 新增 `g:simpleline_show_hunks`(默认 0):把 simplegit 的"当前文件相对 index
+  的增/改/删**行数**"渲染成独立段位 `SimpleLineHunks`。默认关闭是因为它长得
+  跟 Git 段的 `[+n ~n -n]` 很像,而后者数的是 worktree 里的**文件数**——把
+  一个当成另一个渲染会悄悄改变段位的含义,所以两者分开。
+- 监听 `User SimpleGitUpdate` 重绘,交接过来的分支不用等下一次轮询。
+- `:SimpleLineHealth` 报告 provider 选择、simplegit 是否可用、以及当前 buffer
+  实际用的是哪一边。
+
 ### 修复:两个"改了也没用"的渲染选项
 
 - `g:simpletabline_path_mode` 与 `g:simpleline_filetype_icons` 不在 tabline 的

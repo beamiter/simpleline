@@ -34,6 +34,13 @@ g:simpleline_enable_default_mappings = ConfigFlag('simpleline_enable_default_map
 g:simpleline_separator = get(g:, 'simpleline_separator', 'arrow')
 # Git info refresh interval (ms)
 g:simpleline_git_interval = get(g:, 'simpleline_git_interval', 2000)
+# Where the branch and ahead/behind come from: 'auto' prefers simplegit's
+# published status dictionary and falls back to Simpleline's own daemon,
+# 'daemon' ignores simplegit, 'simplegit' ignores the daemon.
+g:simpleline_git_provider = get(g:, 'simpleline_git_provider', 'auto')
+# Per-file added/changed/removed *lines*, which only simplegit knows. Off by
+# default: it looks like the worktree file counts and means something else.
+g:simpleline_show_hunks = ConfigFlag('simpleline_show_hunks', 0)
 # Show devicons for filetype (requires Nerd Font)
 g:simpleline_nerdfont = ConfigFlag('simpleline_nerdfont', 1)
 # Statusline sections. Narrow windows automatically hide metadata first.
