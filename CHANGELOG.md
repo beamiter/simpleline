@@ -29,6 +29,19 @@
 - 新增 `tests/vim/render_cache.vim`:逐项验证"状态没变必须命中"与"每个输入
   变化必须未命中且值正确"。
 
+### 修复:一次失败的 `git status` 会抹掉整个 Git 段
+
+`if !output.status.success() { return Ok(GitStatus::default()) }` 分不清
+"这儿不是仓库"和"这一次调用失败了"。并发的 `git gc` 在重写 ref、挂载点短暂
+不可用、`safe.directory` 抱怨、子进程被 OOM killer 干掉——都落在这个分支里,
+于是 `is_git: false` 被写进缓存,分支、operation、冲突指示一起消失,直到下一次
+成功刷新为止。rebase 中途正好是最需要看到 operation 的时候。
+
+现在只有"确实不在任何仓库里"才报空状态,其余情况回一个 error 事件;客户端的
+`OnDaemonError()` 本来就不会动缓存,于是保留住已知good的数据。stderr 只取第一
+行非空内容并截到 200 字符。判定被拆成纯函数 `interpret_status_failure()` 以便
+单测——这台机器上 `/tmp/.git` 恰好存在,依赖真实目录游走的测试是不可靠的。
+
 ### 修复:daemon 崩溃重启后 Git 段永久不再更新
 
 supervisor 会退避重启并重新握手,但"重发 Git 请求"是本插件自己的事。

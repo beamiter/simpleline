@@ -447,6 +447,35 @@ async fn show_stash_supported() -> bool {
         .await
 }
 
+/// What a non-zero `git status` exit means.
+///
+/// The exit status alone cannot tell "this is not a repository" from "this
+/// invocation failed": a concurrent `git gc` rewriting refs, a briefly
+/// unavailable mount, a safe.directory complaint or an OOM-killed child all
+/// land here too. Reporting `is_git: false` for those wipes a known-good
+/// segment — during a rebase, exactly when the operation indicator matters
+/// most — so only a path that is genuinely outside any repository is reported
+/// as such, and everything else becomes an error the client can ignore while
+/// keeping what it already had.
+fn interpret_status_failure(
+    in_repository: bool,
+    path: &str,
+    stderr: &str,
+) -> Result<GitStatus, String> {
+    if !in_repository {
+        return Ok(GitStatus::default());
+    }
+    let detail: String = stderr
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or("no error output")
+        .chars()
+        .take(200)
+        .collect();
+    Err(format!("git status failed inside {path}: {detail}"))
+}
+
 async fn query_git_status(path: &str, want_files: bool) -> Result<GitStatus, String> {
     let mut command = git_status_command(path, show_stash_supported().await);
     let output = tokio::time::timeout(GIT_TIMEOUT, command.output())
@@ -455,7 +484,11 @@ async fn query_git_status(path: &str, want_files: bool) -> Result<GitStatus, Str
         .map_err(|error| format!("failed to run git status for {path}: {error}"))?;
 
     if !output.status.success() {
-        return Ok(GitStatus::default());
+        return interpret_status_failure(
+            discover_repo(path).is_some(),
+            path,
+            &String::from_utf8_lossy(&output.stderr),
+        );
     }
 
     let mut status = parse_git_status(&String::from_utf8_lossy(&output.stdout), true, want_files);
@@ -774,8 +807,8 @@ mod tests {
     use super::{
         Event, GIT_REPOSITORY_ENV_VARS, GitStatus, MAX_REQUEST_LINE_BYTES, MAX_REQUEST_PATH_BYTES,
         MAX_TRACKED_PATHS, PROTOCOL_VERSION, Request, capabilities, detect_git_operation,
-        discover_repo, git_status_command, git_version_supports_show_stash, parse_git_status,
-        read_request_line, run, validate_request_path,
+        discover_repo, git_status_command, git_version_supports_show_stash,
+        interpret_status_failure, parse_git_status, read_request_line, run, validate_request_path,
     };
     use std::collections::BTreeMap;
     use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader};
@@ -1024,6 +1057,32 @@ u UU N... 100644 100644 100644 100644 1111111 2222222 3333333 conflict.txt
             .windows(2)
             .any(|pair| pair[0] == "-c" && pair[1] == "core.quotePath=false");
         assert!(quote_path, "got {args:?}");
+    }
+
+    #[test]
+    fn tells_a_failed_query_apart_from_a_missing_repository() {
+        // Outside a repository the empty status is the truth.
+        assert_eq!(
+            interpret_status_failure(false, "/work/plain", "fatal: not a git repository"),
+            Ok(GitStatus::default())
+        );
+
+        // Inside one, a failure is only a failure: the client has to keep the
+        // branch and operation it already had rather than watch them vanish.
+        let error = interpret_status_failure(
+            true,
+            "/work/repo",
+            "\nfatal: unable to read index\nsecond line\n",
+        )
+        .unwrap_err();
+        assert!(error.contains("fatal: unable to read index"), "{error}");
+        assert!(!error.contains("second line"), "{error}");
+
+        let quiet = interpret_status_failure(true, "/work/repo", "").unwrap_err();
+        assert!(quiet.contains("no error output"), "{quiet}");
+
+        let long = interpret_status_failure(true, "/work/repo", &"x".repeat(500)).unwrap_err();
+        assert!(long.len() < 300, "{long}");
     }
 
     #[test]

@@ -178,8 +178,10 @@ The Git segment shows the branch, ahead/behind, added/modified/deleted
 counts, conflicts as !n, and stashes as $n. Stash counting requires Git 2.15
 (--show-stash); the daemon probes `git --version` once and skips the flag on
 older installations. Compact windows keep the branch, operation, and
-conflicts. Operation detection reads Git's sentinel files and starts no extra
-process. Directory symlinks are resolved before repository discovery; an
+conflicts. A `git status` that fails inside a repository is reported as an
+error, not as "not a repository", so a transient failure keeps the last
+known-good segment instead of blanking the branch and operation. Operation
+detection reads Git's sentinel files and starts no extra process. Directory symlinks are resolved before repository discovery; an
 unresolvable physical path reports no operation instead of consulting a
 possibly unrelated lexical parent repository.
 
