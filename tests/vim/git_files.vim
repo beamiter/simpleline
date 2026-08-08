@@ -46,7 +46,13 @@ function! s:Payload(id_placeholder, extra) abort
   return substitute(json_encode(l:payload), '^{', '{"id":' . a:id_placeholder . ',', '')
 endfunction
 
-function! s:Daemon(capabilities, files) abort
+" `files` must never be empty for a daemon whose refusal to answer is under
+" test: an empty map makes the want_files branch reply with `"files":{}`, which
+" is indistinguishable from the branch that carries no paths at all, so every
+" assertion downstream passes whether or not the request was gated. `log`, when
+" non-empty, records every request line verbatim — the gate lives in the
+" request, so that is where it has to be observed.
+function! s:Daemon(capabilities, files, log) abort
   let l:path = tempname()
   let l:caps = empty(a:capabilities)
         \ ? '' : ',"capabilities":' . json_encode(a:capabilities)
@@ -58,9 +64,12 @@ function! s:Daemon(capabilities, files) abort
         \ 'files_truncated': v:false,
         \ })
   let l:without_files = s:Payload('%s', {})
+  let l:record = empty(a:log)
+        \ ? '  :' : '  printf ''%s\n'' "$line" >> ' . shellescape(a:log)
   call writefile([
         \ '#!/bin/sh',
         \ 'while IFS= read -r line; do',
+        \ l:record,
         \ '  id=$(printf ''%s'' "$line" | sed -n ''s/.*"id":\([0-9][0-9]*\).*/\1/p'')',
         \ '  case "$line" in',
         \ '    *''"type":"version"''*) printf ' . shellescape(l:handshake . '\n') . ' "$id" ;;',
@@ -73,8 +82,15 @@ function! s:Daemon(capabilities, files) abort
   return l:path
 endfunction
 
+" Every git_info line the daemon has been sent since the log was last cleared.
+function! s:GitRequests(log) abort
+  return filter(readfile(a:log), 'v:val =~# ''"type":"git_info"''')
+endfunction
+
 let s:caps = {'git-status': v:true}
-let s:daemon = s:Daemon(s:caps, {'dirty.txt': 'M', 'deep/nested.txt': 'U'})
+let s:log = tempname()
+call writefile([], s:log)
+let s:daemon = s:Daemon(s:caps, {'dirty.txt': 'M', 'deep/nested.txt': 'U'}, s:log)
 
 let g:simpleline_auto_enable = 0
 let g:simpleline_git_enabled = 1
@@ -94,6 +110,10 @@ call simpleline#RequestGitRefresh()
 sleep 400m
 
 " ------------------------------------------------------------- painting ---
+
+call assert_notequal([], s:GitRequests(s:log), 'the daemon was asked for git info')
+call assert_match('"want_files":true', join(s:GitRequests(s:log), "\n"),
+      \ 'a capable daemon with a live tabline is asked for the paths')
 
 let s:line = simpleline#Tabline()
 call assert_match('SimpleTablineGitModified#dirty.txt', s:line,
@@ -143,13 +163,20 @@ call delete(s:daemon)
 " ------------------------------------------------- capability degradation ---
 
 " A daemon that does not advertise 'git-status' is never asked for paths, and
-" everything else has to keep working exactly as before.
-let s:old = s:Daemon({}, {})
+" everything else has to keep working exactly as before. This daemon is armed
+" with the same file map as the capable one, so it *would* answer with paths if
+" it were asked — without that, "no paint" proves nothing about the request.
+let s:old_log = tempname()
+call writefile([], s:old_log)
+let s:old = s:Daemon({}, {'dirty.txt': 'M', 'deep/nested.txt': 'U'}, s:old_log)
 let g:simpleline_daemon_path = s:old
 call simpleline#Enable()
 execute 'buffer ' . bufnr(s:repo . '/dirty.txt')
 call simpleline#RequestGitRefresh()
 sleep 400m
+call assert_notequal([], s:GitRequests(s:old_log), 'the daemon was asked for git info')
+call assert_notmatch('want_files', join(s:GitRequests(s:old_log), "\n"),
+      \ 'a daemon without the capability is never asked for the paths')
 let s:degraded = simpleline#Tabline()
 call assert_notmatch('SimpleTablineGit', s:degraded, 'no capability, no paint')
 call assert_match('dirty.txt', s:degraded, 'the tabline still renders')
@@ -157,6 +184,7 @@ call assert_match('main', simpleline#ActiveStatusline(), 'the branch still rende
 call assert_match('git file status: on/unavailable', execute('SimpleLineHealth'))
 call simpleline#Stop()
 call delete(s:old)
+call delete(s:old_log)
 
 " ------------------------------------------------- two repositories at once ---
 
@@ -223,7 +251,7 @@ call delete(s:other, 'rf')
 
 " A non-string mark must be rejected by validation, leaving the previous cache
 " entry untouched rather than half-updating it.
-let s:bad = s:Daemon(s:caps, {'dirty.txt': 42})
+let s:bad = s:Daemon(s:caps, {'dirty.txt': 42}, '')
 let g:simpleline_daemon_path = s:bad
 call simpleline#Enable()
 call simpleline#RequestGitRefresh()
@@ -242,6 +270,7 @@ call delete(s:bad)
 
 cd /
 call delete(s:repo, 'rf')
+call delete(s:log)
 
 if !empty(v:errors)
   call writefile(v:errors, s:root . '/tests/git-files-errors.log')
