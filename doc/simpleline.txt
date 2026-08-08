@@ -325,6 +325,10 @@ What it guarantees:
 - A daemon that dies is restarted automatically with exponential backoff.
   If it keeps crashing, the supervisor reports it once and stops trying
   rather than respawning forever; :SimpleLineRestart re-arms it.
+- Requests orphaned by the crash, plus the current directory, are re-issued
+  once the replacement has handshaked. Under g:simpleline_git_interval = 0
+  the restart is the only refresh that will happen, so nothing is left
+  showing pre-crash data.
 - Requests are correlated to replies by id and can time out, so a wedged
   daemon never leaves a callback hanging.
 

@@ -1977,8 +1977,24 @@ def OnDaemonExit(code: number, restarting: bool)
   s_daemon_ready = false
   s_daemon_version = ''
   s_daemon_protocol = 0
-  s_daemon_waiting_dirs = {}
+  # Requests that were in flight when the daemon died will never be answered,
+  # and their directories go back on the waiting list so the next successful
+  # handshake re-issues them.  Clearing the list here instead — which is what
+  # this did — meant FlushDaemonWaiters() ran over an empty dictionary after
+  # every restart: with g:simpleline_git_interval = 0 the Git segment then kept
+  # showing pre-crash data until the next BufEnter, which for someone editing
+  # one file in one window is forever.
+  var orphaned = restarting ? values(s_git_pending) : []
   ClearPending()
+  s_daemon_waiting_dirs = {}
+  if restarting && s_enabled && ConfBool('simpleline_git_enabled', true)
+    for dir in orphaned
+      s_daemon_waiting_dirs[dir] = true
+    endfor
+    # The directory on screen matters even when nothing was in flight: the
+    # restart itself is the only event that will ever prompt a refresh.
+    s_daemon_waiting_dirs[CurrentGitDir()] = true
+  endif
 enddef
 
 def ClearPending()
