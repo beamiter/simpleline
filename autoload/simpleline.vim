@@ -1144,6 +1144,81 @@ def TabItemGroup(bufnum: number, is_cur: bool, marks: dict<string>): string
   return group ==# '' ? 'SimpleTablineInactive' : group
 enddef
 
+# ----------- Powerline separator transitions -----------
+# A powerline separator is a wedge cut from the left item's background and laid
+# over the right item's, so the *pair* of neighbouring groups decides its two
+# colours.  The fixed SimpleTab*To* groups that g:SimpleTablineApplyHL() derives
+# cover the three-way Fill/Active/Inactive world that existed before per-file
+# Git marks — an inactive buffer can now be painted with DiffChange's
+# background, and a wedge still cut from TabLine's leaves a visible notch on
+# both sides of every marked buffer.  Pairs involving a Git group are therefore
+# synthesized here; every pre-Git pair keeps its own named group, which a user
+# may have overridden by hand.
+var s_sep_groups: dict<bool> = {}
+
+def GroupBg(name: string): list<string>
+  var id = synIDtrans(hlID(name))
+  var gui = synIDattr(id, 'bg#', 'gui')
+  var ctm = synIDattr(id, 'bg', 'cterm')
+  # The same guards the tabline's own derivation uses: an unset attribute comes
+  # back empty, and a cterm colour can come back as the pseudo-value 'fg'/'bg',
+  # which :highlight will not accept.
+  if gui ==# ''
+    gui = 'NONE'
+  endif
+  if ctm ==# '' || ctm =~# '^\D'
+    ctm = 'NONE'
+  endif
+  return [gui, ctm]
+enddef
+
+def IsGitGroup(name: string): bool
+  return name =~# '^SimpleTablineGit'
+enddef
+
+# Named deterministically from the pair: the rendered tabline is memoized, and
+# a group name that changed between two renders of the same state would leave
+# the cached string pointing at colours nobody has defined.
+def DerivedSepGroup(left: string, right: string): string
+  var name = 'SimpleTabX' .. substitute(left, '^SimpleTabline', '', '')
+        \ .. 'To' .. substitute(right, '^SimpleTabline', '', '')
+  if has_key(s_sep_groups, name)
+    return name
+  endif
+  var lbg = GroupBg(left)
+  var rbg = GroupBg(right)
+  execute 'highlight ' .. name
+        \ .. ' guifg=' .. lbg[0] .. ' guibg=' .. rbg[0]
+        \ .. ' ctermfg=' .. lbg[1] .. ' ctermbg=' .. rbg[1]
+  s_sep_groups[name] = true
+  return name
+enddef
+
+# [highlight group, glyph] for the separator between two items; the fill group
+# stands in for "no item" at either edge of the bar.
+def TabSepPart(left: string, right: string): list<string>
+  var derived = IsGitGroup(left) || IsGitGroup(right)
+  if left ==# right
+    # A run of items sharing one background gets the thin sub-separator: a
+    # hairline in the fill colour, since a wedge would be invisible.
+    return [derived ? DerivedSepGroup('SimpleTablineFill', right)
+      \ : 'SimpleTabInactSep', s_subsep_l]
+  endif
+  if derived
+    return [DerivedSepGroup(left, right), s_sep_l]
+  endif
+  if left ==# 'SimpleTablineFill'
+    return [right ==# 'SimpleTablineActive'
+      \ ? 'SimpleTabFillToAct' : 'SimpleTabFillToInact', s_sep_l]
+  endif
+  if right ==# 'SimpleTablineFill'
+    return [left ==# 'SimpleTablineActive'
+      \ ? 'SimpleTabActToFill' : 'SimpleTabInactToFill', s_sep_l]
+  endif
+  return [left ==# 'SimpleTablineActive'
+    \ ? 'SimpleTabActToInact' : 'SimpleTabInactToAct', s_sep_l]
+enddef
+
 def IsEligibleBuffer(bn: number): bool
   if bn <= 0 || bufexists(bn) == 0
     return false
@@ -1421,7 +1496,7 @@ def TablinePickMode(): string
     endif
 
     var is_first = true
-    var prev_is_active = false
+    var prev_group = 'SimpleTablineFill'
 
     for vbn in visible
       var k = string(vbn)
@@ -1430,25 +1505,12 @@ def TablinePickMode(): string
       endif
       var b = bynr[k]
       var is_cur = (b.bufnr == curbn)
+      var group = TabItemGroup(b.bufnr, is_cur, marks)
 
-      # Powerline separator
-      if is_first
-        if is_cur
-          s ..= '%#SimpleTabFillToAct#' .. s_sep_l
-        else
-          s ..= '%#SimpleTabFillToInact#' .. s_sep_l
-        endif
-      else
-        if prev_is_active && !is_cur
-          s ..= '%#SimpleTabActToInact#' .. s_sep_l
-        elseif !prev_is_active && is_cur
-          s ..= '%#SimpleTabInactToAct#' .. s_sep_l
-        elseif prev_is_active && is_cur
-          s ..= '%#SimpleTabActToInact#' .. s_sep_l
-        else
-          s ..= '%#SimpleTabInactSep#' .. s_subsep_l
-        endif
-      endif
+      # Powerline separator: its colours come from the two items it sits
+      # between, whatever groups those turn out to be.
+      var sep_part = TabSepPart(prev_group, group)
+      s ..= '%#' .. sep_part[0] .. '#' .. sep_part[1]
 
       var hint_char = ''
       if char_idx < len(s_pick_chars)
@@ -1462,7 +1524,7 @@ def TablinePickMode(): string
       var show_mod = TabConfBool('simpletabline_show_modified', true)
       var mod_mark = (show_mod && get(b, 'changed', 0) == 1) ? ' +' : ''
       var git_icon = GitIconPart(b.bufnr, marks)
-      var grp_item = '%#' .. TabItemGroup(b.bufnr, is_cur, marks) .. '#'
+      var grp_item = '%#' .. group .. '#'
 
       if hint_char !=# '' && len(name) > 0
         s ..= grp_item .. ' %#SimpleTablinePickHint#' .. RenderEscape(hint_char) .. grp_item .. ' ' .. icon .. name .. mod_mark .. git_icon .. ' '
@@ -1471,16 +1533,13 @@ def TablinePickMode(): string
       endif
 
       is_first = false
-      prev_is_active = is_cur
+      prev_group = group
     endfor
 
     # Right separator
     if !is_first
-      if prev_is_active
-        s ..= '%#SimpleTabActToFill#' .. s_sep_l
-      else
-        s ..= '%#SimpleTabInactToFill#' .. s_sep_l
-      endif
+      var tail_part = TabSepPart(prev_group, 'SimpleTablineFill')
+      s ..= '%#' .. tail_part[0] .. '#' .. tail_part[1]
     endif
 
     if right_omitted
@@ -1681,7 +1740,7 @@ export def Tabline(): string
     endif
 
     var is_first = true
-    var prev_is_active = false
+    var prev_group = 'SimpleTablineFill'
 
     for vbn in visible
       var k = string(vbn)
@@ -1690,25 +1749,12 @@ export def Tabline(): string
       endif
       var b = bynr[k]
       var is_cur = (b.bufnr == curbn)
+      var group = TabItemGroup(b.bufnr, is_cur, marks)
 
-      # Powerline separator before this item
-      if is_first
-        if is_cur
-          s ..= '%#SimpleTabFillToAct#' .. s_sep_l
-        else
-          s ..= '%#SimpleTabFillToInact#' .. s_sep_l
-        endif
-      else
-        if prev_is_active && is_cur
-          s ..= '%#SimpleTabActToInact#' .. s_sep_l
-        elseif prev_is_active && !is_cur
-          s ..= '%#SimpleTabActToInact#' .. s_sep_l
-        elseif !prev_is_active && is_cur
-          s ..= '%#SimpleTabInactToAct#' .. s_sep_l
-        else
-          s ..= '%#SimpleTabInactSep#' .. s_subsep_l
-        endif
-      endif
+      # Powerline separator before this item: its colours come from the two
+      # items it sits between, whatever groups those turn out to be.
+      var sep_part = TabSepPart(prev_group, group)
+      s ..= '%#' .. sep_part[0] .. '#' .. sep_part[1]
 
       # Buffer content with padding
       var icon = RenderEscape(BufFtIcon(b.bufnr))
@@ -1723,7 +1769,7 @@ export def Tabline(): string
         key_part = key_grp .. key_txt .. ' '
       endif
 
-      var grp_item = '%#' .. TabItemGroup(b.bufnr, is_cur, marks) .. '#'
+      var grp_item = '%#' .. group .. '#'
       var name = RenderEscape(BufDisplayName(b))
       var show_mod = TabConfBool('simpletabline_show_modified', true)
       var mod_mark = (show_mod && get(b, 'changed', 0) == 1) ? ' +' : ''
@@ -1735,16 +1781,13 @@ export def Tabline(): string
             \ : label
 
       is_first = false
-      prev_is_active = is_cur
+      prev_group = group
     endfor
 
     # Powerline separator after last item
     if !is_first
-      if prev_is_active
-        s ..= '%#SimpleTabActToFill#' .. s_sep_l
-      else
-        s ..= '%#SimpleTabInactToFill#' .. s_sep_l
-      endif
+      var tail_part = TabSepPart(prev_group, 'SimpleTablineFill')
+      s ..= '%#' .. tail_part[0] .. '#' .. tail_part[1]
     endif
 
     if right_omitted
@@ -2376,6 +2419,7 @@ export def Enable()
   ResetRenderCaches()
   # Separators and highlights have just been re-derived; a render produced
   # under the previous ones must not survive a :SimpleLineReload.
+  s_sep_groups = {}
   InvalidateTabline()
   try
     g:SimpleTablineApplyHL()
@@ -2520,6 +2564,11 @@ export def ResetHighlights()
     g:SimpleTablineApplyHL()
   catch
   endtry
+  # The synthesized separator transitions are derived from groups the new
+  # colorscheme has just redefined, and they are only re-derived while
+  # rendering, so the memo has to go with them.
+  s_sep_groups = {}
+  InvalidateTabline()
   redrawstatus
   redrawtabline
 enddef

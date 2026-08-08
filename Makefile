@@ -6,6 +6,7 @@ VIM_TESTS := tests/vim/run.vim \
 	tests/vim/daemon_protocol.vim \
 	tests/vim/git_render.vim \
 	tests/vim/tabline_memo.vim \
+	tests/vim/tabline_sep.vim \
 	tests/vim/render_cache.vim \
 	tests/vim/git_files.vim \
 	tests/vim/git_provider.vim \

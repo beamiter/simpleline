@@ -155,6 +155,8 @@ Refreshes are also triggered by buffer entry/write, directory changes, focus cha
 
 With `g:simpletabline_git_status`, each buffer is painted by the state of its file in the repository the current buffer belongs to: `SimpleTablineGitModified` (linked to `DiffChange`), `SimpleTablineGitAdded` (`DiffAdd`), `SimpleTablineGitDeleted` (`DiffDelete`) and `SimpleTablineGitConflict` (`Error`). The current buffer keeps `SimpleTablineActive` — which buffer you are in matters more than its Git state — and `g:simpletabline_git_status_icons` adds a glyph when colour alone is not enough. This needs a daemon built from this version, which advertises a `git-status` capability; an older binary is never asked for the data, everything else keeps working, and `:SimpleLineHealth` says `git file status: on/unavailable`. Run `./install.sh` and `:SimpleLineRestart` to get it. Paths are capped at 2000 per repository. The paths are only requested while something can paint them: with `g:simpletabline_git_status` off, or with `g:simpleline_tabline` off so that no tabline is rendered at all, the request carries no `want_files` and the daemon collects nothing.
 
+With a powerline separator (`arrow`/`round`) the wedge between two items is drawn in the left one's background over the right one's, so a marked buffer needs transitions the fixed `SimpleTab*To*` groups cannot express: those pairs get a group synthesized from the two neighbours, named `SimpleTabX<left>To<right>` and rebuilt on `ColorScheme`. Pairs with no Git group in them keep their own named group, so hand-written overrides of `SimpleTabActToInact` and friends still apply.
+
 ## Commands
 
 | Command | Action |

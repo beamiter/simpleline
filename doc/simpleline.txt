@@ -220,6 +220,14 @@ state ('M', 'A', 'D', 'U') when a colour alone is not enough; it is empty by
 default because a glyph costs tabline width. Buffers belonging to another
 repository, and buffers with no file, carry no mark.
 
+With g:simpleline_separator 'arrow' or 'round', the wedge between two items is
+drawn in the left one's background over the right one's, so a marked buffer
+needs transitions the fixed SimpleTab*To* groups cannot express. Those pairs
+get a group synthesized from the two neighbours, named SimpleTabX<left>To<right>
+(for example SimpleTabXFillToGitModified), rebuilt on |ColorScheme|. Pairs that
+involve no Git group keep their own named group, so a hand-written override of
+SimpleTabActToInact and friends still applies.
+
 This needs a daemon that advertises the "git-status" capability, which means a
 binary built from this version — run ./install.sh, then :SimpleLineRestart. An
 older binary is never asked for the data and everything else keeps working;

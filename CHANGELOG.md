@@ -2,6 +2,28 @@
 
 ## Unreleased - 2026-08-08
 
+### 修复:被标记的 buffer 两侧的 powerline 楔形颜色对不上
+
+powerline 分隔符是一个楔形:字形用左边那一格的背景色画,底色是右边那一格的
+背景色。所以决定它两个颜色的是**相邻的一对**,而不是"当前/非当前"。逐文件
+Git 标记出现之后,一个非当前 buffer 也可能带着 DiffChange 的背景,但分隔符
+还是只按 `is_cur` 从 TabLine 里取色——默认配置(`nerdfont=1`、
+`separator='arrow'`、`simpletabline_git_status=1`)下,每一个有改动的 buffer
+左右两侧都会露出一道颜色不接的缺口。
+
+- 分隔符改为按相邻的两个高亮组取色。凡是牵涉到 Git 组的组合,现在按
+  `SimpleTabX<左>To<右>`(如 `SimpleTabXFillToGitModified`)即时合成,名字由
+  这一对确定性地推出来——渲染结果是被 memo 的,名字如果会变,缓存下来的串就
+  会指向没人定义过的颜色。
+- 不牵涉 Git 组的组合仍然用原来的 `SimpleTabFillToAct` / `SimpleTabActToInact`
+  等具名组:用户手改过它们的颜色,不能被悄悄忽略。
+- `:SimpleLineReload` 与 |ColorScheme| 会一起丢掉合成组和 tabline 的 memo——
+  合成只发生在渲染时,memo 命中就不会重新推导。
+- 新增 `tests/vim/tabline_sep.vim`:把 TabLine / TabLineSel / TabLineFill /
+  DiffChange 设成四个可辨认的颜色,然后把渲染串里真正写出来的分隔符组的颜色
+  读回来比对。修复前它是红的(楔形取的是 `#111111`,应该是 `#444444`)。
+
+
 ### 修复:关掉 tabline,daemon 照样在收集每个文件的路径
 
 `g:simpleline_tabline = 0` 是文档里的选项:`Enable()` 不碰 `'tabline'`,于是
