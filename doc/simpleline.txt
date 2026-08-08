@@ -197,8 +197,32 @@ g:simpletabline_pick_chars            'asdfjkl;ghqweruiopzxcvbnm'
 g:simpletabline_item_sep              ' | '
 g:simpletabline_key_sep               '  '
 g:simpletabline_ellipsis              ' … '
+g:simpletabline_git_status            1 (colour buffers by Git state)
+g:simpletabline_git_status_icons      {} ({'M': '●', 'A': '✚', ...})
 g:simpletabline_cyan_gui              '#00ffff'
 g:simpletabline_cyan_cterm            '14'
+
+PER-FILE GIT STATUS ~
+                                              *simpleline-tabline-git-status*
+With g:simpletabline_git_status the tabline colours each buffer by the state
+of its file in the repository the current buffer belongs to:
+
+  SimpleTablineGitModified   changed, linked to DiffChange
+  SimpleTablineGitAdded      untracked or newly added, linked to DiffAdd
+  SimpleTablineGitDeleted    deleted, linked to DiffDelete
+  SimpleTablineGitConflict   unmerged, linked to Error
+
+The current buffer keeps SimpleTablineActive: which buffer you are in matters
+more than its Git state. g:simpletabline_git_status_icons adds a glyph per
+state ('M', 'A', 'D', 'U') when a colour alone is not enough; it is empty by
+default because a glyph costs tabline width. Buffers belonging to another
+repository, and buffers with no file, carry no mark.
+
+This needs a daemon that advertises the "git-status" capability, which means a
+binary built from this version — run ./install.sh, then :SimpleLineRestart. An
+older binary is never asked for the data and everything else keeps working;
+:SimpleLineHealth reports "git file status: on/unavailable" in that case. Paths
+are capped at 2000 per repository, after which health says "(truncated)".
 
 ===============================================================================
 INTEGRATIONS                                         *simpleline-integrations*
@@ -270,6 +294,10 @@ TROUBLESHOOTING                                   *simpleline-troubleshooting*
 
 No Git information        Run :SimpleLineHealth, :SimpleLineGitRefresh, then
                           ./install.sh if version/protocol stays unknown/0.
+No per-file tabline paint :SimpleLineHealth reports "git file status:
+                          on/unavailable" when the daemon predates the
+                          "git-status" capability: run ./install.sh, then
+                          :SimpleLineRestart.
 Broken icon glyphs        Install a Nerd Font or set simpleline_nerdfont to 0.
 Polling is unnecessary    Set simpleline_git_interval to 0.
 Need daemon errors        Set simpleline_debug to 1 and inspect :messages.

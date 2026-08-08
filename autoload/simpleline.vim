@@ -5,6 +5,13 @@ vim9script
 # =============================================================
 
 # ----------- State -----------
+# Protocol 1 is the original git_info event; protocol 2 adds the optional
+# per-path `files` map, `files_truncated` and `repo_root`, all additive.  Both
+# are accepted, because the daemon binary is rebuilt by ./install.sh while the
+# Vim files arrive with the plugin manager — a user who updates one and not the
+# other must keep a working Git segment, not lose it.
+const SUPPORTED_PROTOCOLS: list<number> = [1, 2]
+
 var s_enabled: bool = false
 var s_next_id: number = 0
 var s_git_timer: number = 0
@@ -906,6 +913,22 @@ var s_tab_render_root: string = ''
 var s_tab_name_mode: string = ''
 var s_tab_name_cache: dict<string> = {}
 
+# ----------- Per-file Git status -----------
+# The daemon reports which paths in the worktree are changed; this turns that
+# into "which of the open buffers is one of them".  Resolving a buffer path
+# against the repository root costs a path normalization, so the answer is
+# cached and thrown away only when the Git payload actually moves — the
+# tabline is rebuilt on every redraw, and this feeds its memo key.
+var s_git_tick: number = 0
+var s_git_mark_tick: number = -1
+var s_git_mark_cache: dict<string> = {}
+var s_git_mark_groups: dict<string> = {
+  M: 'SimpleTablineGitModified',
+  A: 'SimpleTablineGitAdded',
+  D: 'SimpleTablineGitDeleted',
+  U: 'SimpleTablineGitConflict',
+}
+
 # ----------- Tabline helpers -----------
 def TabConfBool(name: string, default_val: bool): bool
   return ConfBool(name, default_val)
@@ -1026,6 +1049,90 @@ def AbbrevRelPath(rel: string): string
   return join(out, '/')
 enddef
 
+def ResolveGitMark(name: string, root: string, files: dict<any>): string
+  var rel = RelToRoot(name, root)
+  if rel ==# ''
+    # The daemon canonicalizes the worktree root, so a buffer opened through a
+    # symlinked path only lines up after resolve().  That is a syscall, so it
+    # is the fallback rather than the rule.
+    rel = RelToRoot(resolve(fnamemodify(name, ':p')), root)
+  endif
+  if rel ==# ''
+    return ''
+  endif
+  var mark = get(files, rel, '')
+  return type(mark) == v:t_string && has_key(s_git_mark_groups, mark) ? mark : ''
+enddef
+
+# bufnr (as a string) -> 'M' / 'A' / 'D' / 'U', for the repository the current
+# buffer belongs to.  Buffers in another repository simply carry no mark.
+def TablineGitMarks(all: list<dict<any>>): dict<string>
+  if !TabConfBool('simpletabline_git_status', true)
+    return {}
+  endif
+  var info = get(s_git_cache, CurrentGitDir(), {})
+  var files = get(info, 'files', {})
+  var root = get(info, 'repo_root', '')
+  if type(files) != v:t_dict || empty(files) || root ==# ''
+    return {}
+  endif
+  if s_git_mark_tick != s_git_tick
+    s_git_mark_cache = {}
+    s_git_mark_tick = s_git_tick
+  endif
+  var marks: dict<string> = {}
+  for b in all
+    var name = get(b, 'name', '')
+    if name ==# ''
+      continue
+    endif
+    var key = b.bufnr .. "\x01" .. name
+    var mark: string
+    if has_key(s_git_mark_cache, key)
+      mark = s_git_mark_cache[key]
+    else
+      mark = ResolveGitMark(name, root, files)
+      if len(s_git_mark_cache) > 512
+        s_git_mark_cache = {}
+      endif
+      s_git_mark_cache[key] = mark
+    endif
+    if mark !=# ''
+      marks[string(b.bufnr)] = mark
+    endif
+  endfor
+  return marks
+enddef
+
+# Rendered form of the glyph, escaped and spaced exactly as TabLabelText()
+# measures it — the two must agree or the width budget drifts.
+def GitIconPart(bufnum: number, marks: dict<string>): string
+  var icon = GitMarkIcon(get(marks, string(bufnum), ''))
+  return icon ==# '' ? '' : ' ' .. RenderEscape(icon)
+enddef
+
+def GitMarkIcon(mark: string): string
+  if mark ==# ''
+    return ''
+  endif
+  var icons = get(g:, 'simpletabline_git_status_icons', {})
+  if type(icons) != v:t_dict
+    return ''
+  endif
+  var icon = get(icons, mark, '')
+  return type(icon) == v:t_string ? icon : ''
+enddef
+
+# The current buffer keeps its own highlight: which buffer you are in matters
+# more than its Git state, and that state is still shown by the icon.
+def TabItemGroup(bufnum: number, is_cur: bool, marks: dict<string>): string
+  if is_cur
+    return 'SimpleTablineActive'
+  endif
+  var group = get(s_git_mark_groups, get(marks, string(bufnum), ''), '')
+  return group ==# '' ? 'SimpleTablineInactive' : group
+enddef
+
 def IsEligibleBuffer(bn: number): bool
   if bn <= 0 || bufexists(bn) == 0
     return false
@@ -1104,7 +1211,12 @@ def BufDisplayName(b: dict<any>): string
   return name
 enddef
 
-def TabLabelText(b: dict<any>, key: string, pick_mode: bool = false): string
+def TabLabelText(
+    b: dict<any>,
+    key: string,
+    pick_mode: bool = false,
+    marks: dict<string> = {}
+): string
   var name = VisibleText(BufDisplayName(b))
   var powerline = SeparatorStyle() !=# 'plain'
         \ && ConfBool('simpleline_nerdfont', true)
@@ -1118,7 +1230,10 @@ def TabLabelText(b: dict<any>, key: string, pick_mode: bool = false): string
   endif
   var icon = powerline ? VisibleText(BufFtIcon(b.bufnr)) : ''
   var padding = powerline ? '  ' : ''
-  var base = padding .. (key_txt !=# '' ? key_txt .. sep_key : '') .. icon .. name .. mod_mark
+  # The Git glyph is part of the label, so the width budget accounts for it.
+  var git_icon = VisibleText(GitMarkIcon(get(marks, string(b.bufnr), '')))
+  var base = padding .. (key_txt !=# '' ? key_txt .. sep_key : '')
+        \ .. icon .. name .. mod_mark .. (git_icon ==# '' ? '' : ' ' .. git_icon)
   return base
 enddef
 
@@ -1148,7 +1263,8 @@ def ComputeVisible(
     all: list<dict<any>>,
     buf_keys: dict<string>,
     pick_mode: bool = false,
-    index_capacity: number = 0
+    index_capacity: number = 0,
+    marks: dict<string> = {}
 ): list<number>
   var cols = max([&columns, 1])
   var powerline = SeparatorStyle() !=# 'plain'
@@ -1175,10 +1291,10 @@ def ComputeVisible(
   var i = 0
   while i < len(all)
     var key = get(buf_keys, string(all[i].bufnr), '')
-    var txt = TabLabelText(all[i], key, pick_mode)
+    var txt = TabLabelText(all[i], key, pick_mode, marks)
     var w = strdisplaywidth(txt)
     widths->add(w)
-    indexed_widths->add(strdisplaywidth(TabLabelText(all[i], '8', false)))
+    indexed_widths->add(strdisplaywidth(TabLabelText(all[i], '8', false, marks)))
     i += 1
   endwhile
 
@@ -1265,7 +1381,8 @@ def TablinePickMode(): string
     # and prevents late-list buffers or mixed-width keys from overflowing.
     pick_keys[string(binfo.bufnr)] = widest_pick
   endfor
-  var visible = ComputeVisible(all, pick_keys, true)
+  var marks = TablineGitMarks(all)
+  var visible = ComputeVisible(all, pick_keys, true, 0, marks)
 
   var bynr: dict<dict<any>> = {}
   for binfo in all
@@ -1333,12 +1450,13 @@ def TablinePickMode(): string
       var name = RenderEscape(BufDisplayName(b))
       var show_mod = TabConfBool('simpletabline_show_modified', true)
       var mod_mark = (show_mod && get(b, 'changed', 0) == 1) ? ' +' : ''
-      var grp_item = is_cur ? '%#SimpleTablineActive#' : '%#SimpleTablineInactive#'
+      var git_icon = GitIconPart(b.bufnr, marks)
+      var grp_item = '%#' .. TabItemGroup(b.bufnr, is_cur, marks) .. '#'
 
       if hint_char !=# '' && len(name) > 0
-        s ..= grp_item .. ' %#SimpleTablinePickHint#' .. RenderEscape(hint_char) .. grp_item .. ' ' .. icon .. name .. mod_mark .. ' '
+        s ..= grp_item .. ' %#SimpleTablinePickHint#' .. RenderEscape(hint_char) .. grp_item .. ' ' .. icon .. name .. mod_mark .. git_icon .. ' '
       else
-        s ..= grp_item .. ' ' .. icon .. name .. mod_mark .. ' '
+        s ..= grp_item .. ' ' .. icon .. name .. mod_mark .. git_icon .. ' '
       endif
 
       is_first = false
@@ -1393,15 +1511,16 @@ def TablinePickMode(): string
       var name = RenderEscape(BufDisplayName(b))
       var show_mod = TabConfBool('simpletabline_show_modified', true)
       var mod_mark = (show_mod && get(b, 'changed', 0) == 1) ? ' +' : ''
+      var git_icon = GitIconPart(b.bufnr, marks)
 
-      var grp_item = is_cur ? '%#SimpleTablineActive#' : '%#SimpleTablineInactive#'
+      var grp_item = '%#' .. TabItemGroup(b.bufnr, is_cur, marks) .. '#'
       var name_part = ''
 
       if hint_char !=# '' && len(name) > 0
         name_part = '%#SimpleTablinePickHint#' .. RenderEscape(hint_char) .. '%#None#'
-              \ .. grp_item .. name .. mod_mark .. '%#None#'
+              \ .. grp_item .. name .. mod_mark .. git_icon .. '%#None#'
       else
-        name_part = grp_item .. name .. mod_mark .. '%#None#'
+        name_part = grp_item .. name .. mod_mark .. git_icon .. '%#None#'
       endif
 
       s ..= name_part
@@ -1455,7 +1574,7 @@ enddef
 var s_tabline_cache: string = ''
 var s_tabline_key: string = ''
 
-def TablineMemoKey(all: list<dict<any>>): string
+def TablineMemoKey(all: list<dict<any>>, marks: dict<string>): string
   # Everything the rendered string depends on.  Buffer filetype is deliberately
   # absent: it drives the icon but reading it costs a getbufvar() per buffer on
   # every redraw, so a FileType autocommand invalidates instead.  Every other
@@ -1477,9 +1596,11 @@ def TablineMemoKey(all: list<dict<any>>): string
     string(TabConfBool('simpletabline_show_modified', true)),
     string(TabConfBool('simpletabline_superscript_index', true)),
     string(TabConfBool('simpletabline_clickable', true)),
+    string(get(g:, 'simpletabline_git_status_icons', {})),
   ]
   for b in all
-    parts->add(printf('%d:%d:%s', b.bufnr, get(b, 'changed', 0), get(b, 'name', '')))
+    parts->add(printf('%d:%d:%s:%s', b.bufnr, get(b, 'changed', 0),
+      \ get(marks, string(b.bufnr), ''), get(b, 'name', '')))
   endfor
   return join(parts, "\x01")
 enddef
@@ -1505,7 +1626,8 @@ export def Tabline(): string
     return ''
   endif
 
-  var memo_key = TablineMemoKey(all)
+  var marks = TablineGitMarks(all)
+  var memo_key = TablineMemoKey(all, marks)
   if memo_key ==# s_tabline_key
     return s_tabline_cache
   endif
@@ -1518,7 +1640,7 @@ export def Tabline(): string
   for binfo in all
     empty_keys[string(binfo.bufnr)] = ''
   endfor
-  var visible = ComputeVisible(all, empty_keys, false, show_keys ? 10 : 0)
+  var visible = ComputeVisible(all, empty_keys, false, show_keys ? 10 : 0, marks)
   AssignDigitsForVisible(visible)
 
   var buf_keys: dict<string> = {}
@@ -1590,12 +1712,13 @@ export def Tabline(): string
         key_part = key_grp .. key_txt .. ' '
       endif
 
-      var grp_item = is_cur ? '%#SimpleTablineActive#' : '%#SimpleTablineInactive#'
+      var grp_item = '%#' .. TabItemGroup(b.bufnr, is_cur, marks) .. '#'
       var name = RenderEscape(BufDisplayName(b))
       var show_mod = TabConfBool('simpletabline_show_modified', true)
       var mod_mark = (show_mod && get(b, 'changed', 0) == 1) ? ' +' : ''
 
-      var label = grp_item .. ' ' .. key_part .. icon .. name .. mod_mark .. ' '
+      var label = grp_item .. ' ' .. key_part .. icon .. name .. mod_mark
+            \ .. GitIconPart(b.bufnr, marks) .. ' '
       s ..= clickable
             \ ? '%' .. b.bufnr .. '@simpleline#TablineClick@' .. label .. '%X'
             \ : label
@@ -1654,11 +1777,12 @@ export def Tabline(): string
         key_part = key_grp .. key_txt .. '%#None#' .. sep_key
       endif
 
-      var grp_item = is_cur ? '%#SimpleTablineActive#' : '%#SimpleTablineInactive#'
+      var grp_item = '%#' .. TabItemGroup(b.bufnr, is_cur, marks) .. '#'
       var name = RenderEscape(BufDisplayName(b))
       var show_mod = TabConfBool('simpletabline_show_modified', true)
       var mod_mark = (show_mod && get(b, 'changed', 0) == 1) ? ' +' : ''
-      var name_part = grp_item .. name .. mod_mark .. '%#None#'
+      var name_part = grp_item .. name .. mod_mark
+            \ .. GitIconPart(b.bufnr, marks) .. '%#None#'
 
       var label = key_part .. name_part
       s ..= clickable
@@ -1906,11 +2030,30 @@ def ValidGitInfo(ev: dict<any>, dir: string): bool
   if has_key(ev, 'operation') && type(ev.operation) != v:t_string
     return false
   endif
+  # Protocol-2 per-file status, equally additive.  Every value is checked here
+  # rather than at render time: this is the one place a malformed payload can
+  # be rejected wholesale, and the renderer must never have to guard a type.
+  if has_key(ev, 'repo_root') && type(ev.repo_root) != v:t_string
+    return false
+  endif
+  if has_key(ev, 'files_truncated') && type(ev.files_truncated) != v:t_bool
+    return false
+  endif
+  if has_key(ev, 'files')
+    if type(ev.files) != v:t_dict
+      return false
+    endif
+    for mark in values(ev.files)
+      if type(mark) != v:t_string
+        return false
+      endif
+    endfor
+  endif
   return true
 enddef
 
 def OnGitInfo(ev: dict<any>)
-  if !s_daemon_ready || s_daemon_protocol != 1
+  if !s_daemon_ready || index(SUPPORTED_PROTOCOLS, s_daemon_protocol) < 0
     DebugLog('ignored git response before a compatible daemon handshake')
     return
   endif
@@ -1941,6 +2084,9 @@ def OnGitInfo(ev: dict<any>)
     ahead: get(ev, 'ahead', 0),
     behind: get(ev, 'behind', 0),
     is_git: get(ev, 'is_git', false),
+    files: get(ev, 'files', {}),
+    files_truncated: get(ev, 'files_truncated', false),
+    repo_root: get(ev, 'repo_root', ''),
   }
   if !has_key(s_git_cache, dir) && len(s_git_cache) >= 128
     remove(s_git_cache, keys(s_git_cache)[0])
@@ -1951,7 +2097,11 @@ def OnGitInfo(ev: dict<any>)
     s_last_error = ''
   endif
   if changed
+    # Per-buffer marks are resolved against this payload and cached; the tick
+    # is what tells that cache its inputs moved.
+    s_git_tick += 1
     redrawstatus
+    redrawtabline
   endif
   RefreshQueuedGit(dir)
 enddef
@@ -1988,7 +2138,7 @@ def OnDaemonEvent(ev: dict<any>)
     if type(version) == v:t_string && version !=# '' && type(protocol) == v:t_number
       s_daemon_version = version
       s_daemon_protocol = protocol
-      if protocol != 1
+      if index(SUPPORTED_PROTOCOLS, protocol) < 0
         s_daemon_ready = false
         s_daemon_incompatible = true
         s_daemon_waiting_dirs = {}
@@ -2055,9 +2205,28 @@ def RequestGitDir(dir: string)
   var id = NextId()
   s_git_pending[string(id)] = dir
   s_git_inflight[dir] = id
-  if !SendReq({type: 'git_info', id: id, path: dir})
+  var request: dict<any> = {type: 'git_info', id: id, path: dir}
+  if WantFileStatus()
+    # Asked for per request rather than always: collecting and serializing
+    # every changed path is only worth its wire cost when something paints it.
+    request.want_files = true
+  endif
+  if !SendReq(request)
     TakePending(id)
   endif
+enddef
+
+# The daemon advertises 'git-status' on the handshake, so an older binary that
+# knows nothing about per-file marks is simply never asked for them.
+def WantFileStatus(): bool
+  if !TabConfBool('simpletabline_git_status', true)
+    return false
+  endif
+  try
+    return simpleline#core#HasCap('git-status')
+  catch
+    return false
+  endtry
 enddef
 
 def FlushDaemonWaiters()
@@ -2364,6 +2533,14 @@ export def Health()
         \ .. (type(custom_left) == v:t_list ? len(custom_left) : 0) .. '/'
         \ .. (type(custom_right) == v:t_list ? len(custom_right) : 0) .. ')'
   echo '  git cache/pending: ' .. len(s_git_cache) .. '/' .. len(s_git_pending)
+  var current = get(s_git_cache, CurrentGitDir(), {})
+  var files = get(current, 'files', {})
+  echo '  git file status: ' .. (TabConfBool('simpletabline_git_status', true) ? 'on' : 'off')
+        \ .. '/' .. (WantFileStatus() ? 'negotiated' : 'unavailable')
+        \ .. ', ' .. (type(files) == v:t_dict ? len(files) : 0) .. ' path(s)'
+        \ .. (get(current, 'files_truncated', false) ? ' (truncated)' : '')
+        \ .. ', root ' .. (get(current, 'repo_root', '') ==# ''
+        \   ? 'unknown' : get(current, 'repo_root', ''))
   echo '  separator: ' .. SeparatorStyle()
   if s_last_error !=# ''
     echo '  last error: ' .. s_last_error

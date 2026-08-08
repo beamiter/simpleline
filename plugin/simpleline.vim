@@ -80,6 +80,12 @@ g:simpletabline_fallback_cwd_root = ConfigFlag('simpletabline_fallback_cwd_root'
 g:simpletabline_newbuf_side   = get(g:, 'simpletabline_newbuf_side', 'right')
 g:simpletabline_clickable     = ConfigFlag('simpletabline_clickable', 1)
 g:simpletabline_ellipsis      = get(g:, 'simpletabline_ellipsis', ' … ')
+# Colour tabline buffers by their Git state. Needs a daemon advertising the
+# 'git-status' capability; an older binary is never asked for the data.
+g:simpletabline_git_status    = ConfigFlag('simpletabline_git_status', 1)
+# Optional glyph per state, for example {'M': '●', 'A': '✚', 'D': '✖', 'U': '!'}.
+# Empty by default: colour alone costs no tabline width.
+g:simpletabline_git_status_icons = get(g:, 'simpletabline_git_status_icons', {})
 
 g:simpletabline_cyan_gui   = get(g:, 'simpletabline_cyan_gui', '#00ffff')
 g:simpletabline_cyan_cterm = get(g:, 'simpletabline_cyan_cterm', '14')
@@ -93,6 +99,12 @@ highlight default link SimpleTablineIndex         TabLine
 highlight default link SimpleTablineIndexActive   TabLineSel
 highlight default link SimpleTablineSep           TabLine
 highlight default link SimpleTablineSepCurrent    TabLineSel
+# Per-file Git state, linked to the colorscheme's own diff groups rather than
+# to a palette of our own.
+highlight default link SimpleTablineGitModified   DiffChange
+highlight default link SimpleTablineGitAdded      DiffAdd
+highlight default link SimpleTablineGitDeleted    DiffDelete
+highlight default link SimpleTablineGitConflict   Error
 highlight default SimpleTablinePickHint guifg=#ff0000 ctermfg=red gui=bold cterm=bold
 
 def g:SimpleTablineApplyHL()
@@ -212,6 +224,10 @@ augroup SimpleTablineAuto
         \ | highlight default link SimpleTablineIndexActive   TabLineSel
         \ | highlight default link SimpleTablineSep           TabLine
         \ | highlight default link SimpleTablineSepCurrent    TabLineSel
+        \ | highlight default link SimpleTablineGitModified   DiffChange
+        \ | highlight default link SimpleTablineGitAdded      DiffAdd
+        \ | highlight default link SimpleTablineGitDeleted    DiffDelete
+        \ | highlight default link SimpleTablineGitConflict   Error
         \ | highlight default SimpleTablinePickHint guifg=#ff0000 ctermfg=red gui=bold cterm=bold
         \ | call g:SimpleTablineApplyHL()
 augroup END

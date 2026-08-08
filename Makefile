@@ -6,7 +6,8 @@ VIM_TESTS := tests/vim/run.vim \
 	tests/vim/daemon_protocol.vim \
 	tests/vim/git_render.vim \
 	tests/vim/tabline_memo.vim \
-	tests/vim/render_cache.vim
+	tests/vim/render_cache.vim \
+	tests/vim/git_files.vim
 
 .PHONY: check test rust-test vim-test install vim-core defcompile core-verify
 

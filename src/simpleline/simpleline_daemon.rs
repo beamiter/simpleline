@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::{
+    collections::BTreeMap,
     path::{Path, PathBuf},
     sync::Arc,
     time::Duration,
@@ -14,7 +15,16 @@ const MAX_REQUEST_PATH_BYTES: usize = 4096;
 // A valid path may expand sixfold when JSON escapes ASCII control bytes. Keep
 // enough headroom for the request envelope and a maximum-width u64 request ID.
 const MAX_REQUEST_LINE_BYTES: usize = MAX_REQUEST_PATH_BYTES * 6 + 1024;
-const PROTOCOL_VERSION: u32 = 1;
+// Protocol 2 adds the optional per-path `files` map, `files_truncated` and
+// `repo_root` to the git_info event, and advertises capabilities on the version
+// reply.  Every one of those is additive: a protocol-1 client that ignores them
+// still reads the same event it always did.
+const PROTOCOL_VERSION: u32 = 2;
+// A dirty tree of 200k files must not turn one refresh into a multi-megabyte
+// JSON line.  Beyond this many paths the map is cut off and `files_truncated`
+// says so, which is honest about the tabline showing fewer marks than there are
+// changes.
+const MAX_TRACKED_PATHS: usize = 2000;
 const GIT_REPOSITORY_ENV_VARS: [&str; 8] = [
     "GIT_DIR",
     "GIT_WORK_TREE",
@@ -32,7 +42,15 @@ enum Request {
     #[serde(rename = "version")]
     Version { id: u64 },
     #[serde(rename = "git_info")]
-    GitInfo { id: u64, path: String },
+    GitInfo {
+        id: u64,
+        path: String,
+        // Collecting and serializing every changed path is only worth it when
+        // the client paints per-file marks, so it is opt-in per request. An
+        // older client omits the field entirely.
+        #[serde(default)]
+        want_files: bool,
+    },
 }
 
 #[derive(Debug, Serialize)]
@@ -43,6 +61,10 @@ enum Event {
         id: u64,
         version: &'static str,
         protocol: u32,
+        // The supervisor stores this as a dictionary and answers HasCap() from
+        // it, so a client can ask for a feature by name instead of inferring it
+        // from a version number.
+        capabilities: BTreeMap<&'static str, bool>,
     },
     #[serde(rename = "git_info")]
     GitInfo {
@@ -59,6 +81,12 @@ enum Event {
         ahead: u32,
         behind: u32,
         is_git: bool,
+        // Repository-relative path -> one of 'M', 'A', 'D', 'U'. Empty unless
+        // the request asked for it.
+        files: BTreeMap<String, char>,
+        files_truncated: bool,
+        // Absolute worktree root the paths above are relative to.
+        repo_root: String,
     },
     #[serde(rename = "error")]
     Error { id: u64, message: String },
@@ -77,6 +105,12 @@ where
 }
 
 type EventTx = tokio::sync::mpsc::Sender<String>;
+
+/// Features a client may ask for by name rather than infer from a version
+/// number. The supervisor keeps this dictionary and answers `HasCap()` from it.
+fn capabilities() -> BTreeMap<&'static str, bool> {
+    BTreeMap::from([("git-status", true)])
+}
 
 async fn send_event(out: &EventTx, evt: &Event) {
     if let Ok(line) = serde_json::to_string(evt) {
@@ -97,6 +131,9 @@ struct GitStatus {
     ahead: u32,
     behind: u32,
     is_git: bool,
+    files: BTreeMap<String, char>,
+    files_truncated: bool,
+    repo_root: String,
 }
 
 fn parse_ab_count(value: Option<&str>, prefix: char) -> u32 {
@@ -113,15 +150,53 @@ fn short_detached_oid(oid: &str) -> String {
     format!(":{}", oid.chars().take(7).collect::<String>())
 }
 
-fn count_ordinary_change(status: &mut GitStatus, xy: &str) {
+fn ordinary_change_mark(xy: &str) -> char {
     if xy.bytes().any(|status| status == b'A') {
-        status.added = status.added.saturating_add(1);
+        'A'
     } else if xy.bytes().any(|status| status == b'D') {
-        status.deleted = status.deleted.saturating_add(1);
+        'D'
     } else {
-        status.modified = status.modified.saturating_add(1);
+        'M'
+    }
+}
+
+fn count_ordinary_change(status: &mut GitStatus, xy: &str) {
+    match ordinary_change_mark(xy) {
+        'A' => status.added = status.added.saturating_add(1),
+        'D' => status.deleted = status.deleted.saturating_add(1),
+        _ => status.modified = status.modified.saturating_add(1),
     }
     status.dirty = true;
+}
+
+/// The path field of a porcelain-v2 record, given how many space-separated
+/// fields precede it.
+///
+/// A path may contain spaces, so the remainder of the line is taken whole; a
+/// rename record appends the original path after a TAB, and only the current
+/// name is of interest here.
+fn record_path(record: &str, leading_fields: usize) -> Option<&str> {
+    let mut rest = record;
+    for _ in 0..leading_fields {
+        rest = rest.split_once(' ')?.1;
+    }
+    let path = rest.split('\t').next().unwrap_or(rest);
+    (!path.is_empty()).then_some(path)
+}
+
+fn track_path(status: &mut GitStatus, path: Option<&str>, mark: char) {
+    let Some(path) = path else { return };
+    // Git still quotes a path containing control characters even with
+    // core.quotePath=false. Matching one against a buffer name would need a
+    // full C-unquote, and marking the wrong file is worse than marking none.
+    if path.starts_with('"') {
+        return;
+    }
+    if status.files.len() >= MAX_TRACKED_PATHS {
+        status.files_truncated = true;
+        return;
+    }
+    status.files.insert(path.to_string(), mark);
 }
 
 /// Parse one `git status --porcelain=v2 --branch [--show-stash]` response.
@@ -129,7 +204,11 @@ fn count_ordinary_change(status: &mut GitStatus, xy: &str) {
 /// Rename/copy records are counted as modified because each record represents
 /// one logical worktree entry, untracked entries are added, and unmerged
 /// records are reported separately as conflicts.
-fn parse_git_status(stdout: &str, is_git: bool) -> GitStatus {
+///
+/// With `collect_files` the same records also yield a repository-relative path
+/// -> mark map. Every path was already being parsed and thrown away; keeping it
+/// is what lets a client say *which* of the open buffers is dirty.
+fn parse_git_status(stdout: &str, is_git: bool, collect_files: bool) -> GitStatus {
     if !is_git {
         return GitStatus::default();
     }
@@ -161,18 +240,37 @@ fn parse_git_status(stdout: &str, is_git: bool) -> GitStatus {
             continue;
         }
 
+        // Field counts before the path: 7 for an ordinary record, 8 for a
+        // rename/copy (it carries the similarity score too), 9 for an unmerged
+        // one, and none for an untracked path.
         if let Some(record) = line.strip_prefix("1 ") {
             let xy = record.split_ascii_whitespace().next().unwrap_or_default();
             count_ordinary_change(&mut status, xy);
-        } else if line.starts_with("2 ") {
+            if collect_files {
+                track_path(
+                    &mut status,
+                    record_path(record, 7),
+                    ordinary_change_mark(xy),
+                );
+            }
+        } else if let Some(record) = line.strip_prefix("2 ") {
             status.modified = status.modified.saturating_add(1);
             status.dirty = true;
-        } else if line.starts_with("u ") {
+            if collect_files {
+                track_path(&mut status, record_path(record, 8), 'M');
+            }
+        } else if let Some(record) = line.strip_prefix("u ") {
             status.conflicts = status.conflicts.saturating_add(1);
             status.dirty = true;
-        } else if line.starts_with("? ") {
+            if collect_files {
+                track_path(&mut status, record_path(record, 9), 'U');
+            }
+        } else if let Some(record) = line.strip_prefix("? ") {
             status.added = status.added.saturating_add(1);
             status.dirty = true;
+            if collect_files {
+                track_path(&mut status, record_path(record, 0), 'A');
+            }
         }
     }
 
@@ -197,10 +295,22 @@ fn command_dir(path: &str) -> PathBuf {
     }
 }
 
-/// Find the worktree-specific Git directory without spawning another Git
-/// process. Normal repositories use a `.git/` directory; linked worktrees and
-/// submodules use a `gitdir: ...` marker file instead.
-fn discover_git_dir(path: &str) -> Option<PathBuf> {
+/// Where a repository lives, as seen from one path.
+#[derive(Debug, Eq, PartialEq)]
+struct RepoPaths {
+    /// The worktree-specific Git directory: `<root>/.git` for a normal
+    /// repository, the location named by the `gitdir:` marker otherwise.
+    git_dir: PathBuf,
+    /// The directory holding the `.git` marker. Status paths are relative to
+    /// it, and it is the worktree root in both layouts — unlike `git_dir`,
+    /// which for a linked worktree points inside the main repository.
+    worktree_root: PathBuf,
+}
+
+/// Find the repository without spawning another Git process. Normal
+/// repositories use a `.git/` directory; linked worktrees and submodules use a
+/// `gitdir: ...` marker file instead.
+fn discover_repo(path: &str) -> Option<RepoPaths> {
     let start = command_dir(path);
     let start = if start.is_absolute() {
         start
@@ -217,16 +327,22 @@ fn discover_git_dir(path: &str) -> Option<PathBuf> {
     for dir in start.ancestors() {
         let marker = dir.join(".git");
         if marker.is_dir() {
-            return Some(marker);
+            return Some(RepoPaths {
+                git_dir: marker,
+                worktree_root: dir.to_path_buf(),
+            });
         }
         if marker.is_file() {
             let contents = std::fs::read_to_string(&marker).ok()?;
             let location = contents.trim().strip_prefix("gitdir:")?.trim();
             let location = PathBuf::from(location);
-            return Some(if location.is_absolute() {
-                location
-            } else {
-                dir.join(location)
+            return Some(RepoPaths {
+                git_dir: if location.is_absolute() {
+                    location
+                } else {
+                    dir.join(location)
+                },
+                worktree_root: dir.to_path_buf(),
             });
         }
     }
@@ -278,6 +394,11 @@ fn git_status_command(path: &str, show_stash: bool) -> tokio::process::Command {
     let mut command = tokio::process::Command::new("git");
     command
         .args([
+            // core.quotePath=false keeps non-ASCII paths raw. Quoted paths
+            // would need a C-unquote before they could be matched against a
+            // buffer name, and a CJK file name is not an edge case.
+            "-c",
+            "core.quotePath=false",
             "status",
             "--porcelain=v2",
             "--branch",
@@ -326,7 +447,7 @@ async fn show_stash_supported() -> bool {
         .await
 }
 
-async fn query_git_status(path: &str) -> Result<GitStatus, String> {
+async fn query_git_status(path: &str, want_files: bool) -> Result<GitStatus, String> {
     let mut command = git_status_command(path, show_stash_supported().await);
     let output = tokio::time::timeout(GIT_TIMEOUT, command.output())
         .await
@@ -337,15 +458,25 @@ async fn query_git_status(path: &str) -> Result<GitStatus, String> {
         return Ok(GitStatus::default());
     }
 
-    let mut status = parse_git_status(&String::from_utf8_lossy(&output.stdout), true);
-    if let Some(git_dir) = discover_git_dir(path) {
-        status.operation = detect_git_operation(&git_dir);
+    let mut status = parse_git_status(&String::from_utf8_lossy(&output.stdout), true, want_files);
+    if let Some(repo) = discover_repo(path) {
+        status.operation = detect_git_operation(&repo.git_dir);
+        // Reported unconditionally: the client needs it to resolve a buffer
+        // path against the paths above, and it costs nothing beyond the walk
+        // the operation probe already does.
+        status.repo_root = repo.worktree_root.to_string_lossy().into_owned();
     }
     Ok(status)
 }
 
-async fn handle_git_info(id: u64, path: String, tx: EventTx, _permit: OwnedSemaphorePermit) {
-    match query_git_status(&path).await {
+async fn handle_git_info(
+    id: u64,
+    path: String,
+    want_files: bool,
+    tx: EventTx,
+    _permit: OwnedSemaphorePermit,
+) {
+    match query_git_status(&path, want_files).await {
         Ok(status) => {
             send_event(
                 &tx,
@@ -363,6 +494,9 @@ async fn handle_git_info(id: u64, path: String, tx: EventTx, _permit: OwnedSemap
                     ahead: status.ahead,
                     behind: status.behind,
                     is_git: status.is_git,
+                    files: status.files,
+                    files_truncated: status.files_truncated,
+                    repo_root: status.repo_root,
                 },
             )
             .await;
@@ -501,11 +635,16 @@ where
                         id,
                         version: env!("CARGO_PKG_VERSION"),
                         protocol: PROTOCOL_VERSION,
+                        capabilities: capabilities(),
                     },
                 )
                 .await;
             }
-            Request::GitInfo { id, path } => {
+            Request::GitInfo {
+                id,
+                path,
+                want_files,
+            } => {
                 if let Err(message) = validate_request_path(&path) {
                     send_event(&out_tx, &Event::Error { id, message }).await;
                     continue;
@@ -526,7 +665,7 @@ where
                 };
                 let tx = out_tx.clone();
                 requests.spawn(async move {
-                    handle_git_info(id, path, tx, permit).await;
+                    handle_git_info(id, path, want_files, tx, permit).await;
                 });
             }
         }
@@ -634,10 +773,11 @@ async fn main() -> std::process::ExitCode {
 mod tests {
     use super::{
         Event, GIT_REPOSITORY_ENV_VARS, GitStatus, MAX_REQUEST_LINE_BYTES, MAX_REQUEST_PATH_BYTES,
-        PROTOCOL_VERSION, Request, detect_git_operation, discover_git_dir, git_status_command,
-        git_version_supports_show_stash, parse_git_status, read_request_line, run,
-        validate_request_path,
+        MAX_TRACKED_PATHS, PROTOCOL_VERSION, Request, capabilities, detect_git_operation,
+        discover_repo, git_status_command, git_version_supports_show_stash, parse_git_status,
+        read_request_line, run, validate_request_path,
     };
+    use std::collections::BTreeMap;
     use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader};
 
     #[test]
@@ -653,7 +793,7 @@ mod tests {
 ";
 
         assert_eq!(
-            parse_git_status(output, true),
+            parse_git_status(output, true, false),
             GitStatus {
                 branch: "main".to_string(),
                 dirty: true,
@@ -666,6 +806,7 @@ mod tests {
                 ahead: 0,
                 behind: 0,
                 is_git: true,
+                ..GitStatus::default()
             }
         );
     }
@@ -677,7 +818,7 @@ mod tests {
 # branch.head (detached)
 ";
 
-        let status = parse_git_status(output, true);
+        let status = parse_git_status(output, true, false);
         assert_eq!(status.branch, ":0123456");
         assert!(status.is_git);
         assert!(!status.dirty);
@@ -692,7 +833,7 @@ mod tests {
 # branch.ab +12 -3
 ";
 
-        let status = parse_git_status(output, true);
+        let status = parse_git_status(output, true, false);
         assert_eq!(status.ahead, 12);
         assert_eq!(status.behind, 3);
     }
@@ -705,7 +846,7 @@ mod tests {
 2 R. N... 100644 100644 100644 1111111 2222222 R100 new.txt\told.txt
 ";
 
-        let status = parse_git_status(output, true);
+        let status = parse_git_status(output, true, false);
         assert_eq!(status.modified, 1);
         assert!(status.dirty);
     }
@@ -718,7 +859,7 @@ mod tests {
 u UU N... 100644 100644 100644 100644 1111111 2222222 3333333 conflict.txt
 ";
 
-        let status = parse_git_status(output, true);
+        let status = parse_git_status(output, true, false);
         assert_eq!(status.conflicts, 1);
         assert_eq!(status.modified, 0);
         assert!(status.dirty);
@@ -732,7 +873,7 @@ u UU N... 100644 100644 100644 100644 1111111 2222222 3333333 conflict.txt
 # stash 3
 ";
 
-        let status = parse_git_status(output, true);
+        let status = parse_git_status(output, true, false);
         assert_eq!(status.stash, 3);
         assert!(!status.dirty);
     }
@@ -756,7 +897,7 @@ u UU N... 100644 100644 100644 100644 1111111 2222222 3333333 conflict.txt
 ? untracked file.txt
 ";
 
-        let status = parse_git_status(output, true);
+        let status = parse_git_status(output, true, false);
         assert_eq!(status.added, 1);
         assert!(status.dirty);
     }
@@ -770,7 +911,7 @@ u UU N... 100644 100644 100644 100644 1111111 2222222 3333333 conflict.txt
 ";
 
         assert_eq!(
-            parse_git_status(output, true),
+            parse_git_status(output, true, false),
             GitStatus {
                 branch: "main".to_string(),
                 is_git: true,
@@ -781,7 +922,141 @@ u UU N... 100644 100644 100644 100644 1111111 2222222 3333333 conflict.txt
 
     #[test]
     fn parses_non_git_directory() {
-        assert_eq!(parse_git_status("", false), GitStatus::default());
+        assert_eq!(parse_git_status("", false, false), GitStatus::default());
+    }
+
+    // Every record type carries its path at a different offset, and a path may
+    // contain spaces — so the field count, not whitespace splitting, is what
+    // finds it.  Getting this wrong marks the wrong buffer, which is worse
+    // than marking none.
+    #[test]
+    fn collects_one_mark_per_changed_path() {
+        let output = "\
+# branch.oid 0123456789abcdef0123456789abcdef01234567
+# branch.head main
+1 A. N... 000000 100644 100644 0000000 1111111 added.txt
+1 .M N... 100644 100644 100644 1111111 2222222 sub/dir/mod file.txt
+1 D. N... 100644 000000 000000 1111111 0000000 gone.txt
+2 R. N... 100644 100644 100644 1111111 2222222 R100 new.txt\told.txt
+u UU N... 100644 100644 100644 100644 1111111 2222222 3333333 conflict.txt
+? untracked file.txt
+";
+
+        let status = parse_git_status(output, true, true);
+        assert_eq!(
+            status.files,
+            BTreeMap::from([
+                ("added.txt".to_string(), 'A'),
+                ("sub/dir/mod file.txt".to_string(), 'M'),
+                ("gone.txt".to_string(), 'D'),
+                // The current name, not the one it was renamed from.
+                ("new.txt".to_string(), 'M'),
+                ("conflict.txt".to_string(), 'U'),
+                ("untracked file.txt".to_string(), 'A'),
+            ])
+        );
+        assert!(!status.files_truncated);
+        // The counters are unchanged by collection.
+        assert_eq!(status.added, 2);
+        assert_eq!(status.modified, 2);
+        assert_eq!(status.deleted, 1);
+        assert_eq!(status.conflicts, 1);
+    }
+
+    #[test]
+    fn skips_path_collection_unless_asked() {
+        let output = "\
+# branch.oid 0123456789abcdef0123456789abcdef01234567
+# branch.head main
+1 .M N... 100644 100644 100644 1111111 2222222 modified.txt
+";
+
+        let status = parse_git_status(output, true, false);
+        assert!(status.files.is_empty());
+        assert_eq!(status.modified, 1);
+    }
+
+    #[test]
+    fn caps_the_path_map_and_reports_the_cut() {
+        let mut output = String::from(
+            "\
+# branch.oid 0123456789abcdef0123456789abcdef01234567
+# branch.head main
+",
+        );
+        for index in 0..(MAX_TRACKED_PATHS + 25) {
+            output.push_str(&format!(
+                "1 .M N... 100644 100644 100644 1111111 2222222 file{index}.txt\n"
+            ));
+        }
+
+        let status = parse_git_status(&output, true, true);
+        assert_eq!(status.files.len(), MAX_TRACKED_PATHS);
+        assert!(status.files_truncated);
+        // The counters still describe the whole tree, only the map is cut.
+        assert_eq!(status.modified as usize, MAX_TRACKED_PATHS + 25);
+    }
+
+    #[test]
+    fn drops_paths_git_still_quotes() {
+        let output = "\
+# branch.oid 0123456789abcdef0123456789abcdef01234567
+# branch.head main
+1 .M N... 100644 100644 100644 1111111 2222222 \"new\\nline.txt\"
+1 .M N... 100644 100644 100644 1111111 2222222 plain.txt
+";
+
+        let status = parse_git_status(output, true, true);
+        assert_eq!(
+            status.files,
+            BTreeMap::from([("plain.txt".to_string(), 'M')])
+        );
+        assert_eq!(status.modified, 2);
+    }
+
+    #[test]
+    fn keeps_non_ascii_paths_unquoted() {
+        // core.quotePath=false is what makes this possible; without it Git
+        // would emit "sub/b \321\201.txt" and the path would be dropped.
+        let command = git_status_command(".", false);
+        let args: Vec<_> = command.as_std().get_args().collect();
+        let quote_path = args
+            .windows(2)
+            .any(|pair| pair[0] == "-c" && pair[1] == "core.quotePath=false");
+        assert!(quote_path, "got {args:?}");
+    }
+
+    #[test]
+    fn reports_the_worktree_root_for_a_linked_worktree() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "simpleline-worktree-root-{}-{unique}",
+            std::process::id()
+        ));
+        let worktree = root.join("worktree");
+        let nested = worktree.join("src/nested");
+        let git_dir = root.join("metadata");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::create_dir_all(&git_dir).unwrap();
+        std::fs::write(worktree.join(".git"), "gitdir: ../metadata\n").unwrap();
+
+        // The Git directory of a linked worktree lives inside the main
+        // repository, so it says nothing about where status paths are rooted;
+        // the directory holding the marker does.
+        let repo = discover_repo(nested.to_str().unwrap()).unwrap();
+        assert_eq!(
+            std::fs::canonicalize(&repo.worktree_root).unwrap(),
+            std::fs::canonicalize(&worktree).unwrap()
+        );
+        assert_eq!(
+            std::fs::canonicalize(&repo.git_dir).unwrap(),
+            std::fs::canonicalize(&git_dir).unwrap()
+        );
+
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -801,7 +1076,7 @@ u UU N... 100644 100644 100644 100644 1111111 2222222 3333333 conflict.txt
         std::fs::create_dir_all(&git_dir).unwrap();
         std::fs::write(worktree.join(".git"), "gitdir: ../metadata\n").unwrap();
 
-        let discovered = discover_git_dir(nested.to_str().unwrap()).unwrap();
+        let discovered = discover_repo(nested.to_str().unwrap()).unwrap().git_dir;
         assert_eq!(
             std::fs::canonicalize(discovered).unwrap(),
             std::fs::canonicalize(&git_dir).unwrap()
@@ -857,7 +1132,9 @@ u UU N... 100644 100644 100644 100644 1111111 2222222 3333333 conflict.txt
         std::fs::write(target.join(".git/CHERRY_PICK_HEAD"), "target").unwrap();
         symlink(&target, outer.join("linked")).unwrap();
 
-        let discovered = discover_git_dir(outer.join("linked/src").to_str().unwrap()).unwrap();
+        let discovered = discover_repo(outer.join("linked/src").to_str().unwrap())
+            .unwrap()
+            .git_dir;
         assert_eq!(
             std::fs::canonicalize(&discovered).unwrap(),
             std::fs::canonicalize(target.join(".git")).unwrap()
@@ -869,7 +1146,7 @@ u UU N... 100644 100644 100644 100644 1111111 2222222 3333333 conflict.txt
         // so reporting the outer MERGE would be actively misleading.
         symlink(root.join("missing-target"), outer.join("dangling")).unwrap();
         assert_eq!(
-            discover_git_dir(outer.join("dangling/src").to_str().unwrap()),
+            discover_repo(outer.join("dangling/src").to_str().unwrap()),
             None
         );
 
@@ -892,6 +1169,9 @@ u UU N... 100644 100644 100644 100644 1111111 2222222 3333333 conflict.txt
             ahead: 0,
             behind: 0,
             is_git: true,
+            files: BTreeMap::from([("src/main.rs".to_string(), 'M')]),
+            files_truncated: true,
+            repo_root: "/work/project".to_string(),
         })
         .unwrap();
 
@@ -901,6 +1181,9 @@ u UU N... 100644 100644 100644 100644 1111111 2222222 3333333 conflict.txt
         assert_eq!(json["conflicts"], 2);
         assert_eq!(json["stash"], 1);
         assert_eq!(json["operation"], "MERGE");
+        assert_eq!(json["files"]["src/main.rs"], "M");
+        assert_eq!(json["files_truncated"], true);
+        assert_eq!(json["repo_root"], "/work/project");
     }
 
     #[test]
@@ -909,6 +1192,7 @@ u UU N... 100644 100644 100644 100644 1111111 2222222 3333333 conflict.txt
             id: 7,
             version: env!("CARGO_PKG_VERSION"),
             protocol: PROTOCOL_VERSION,
+            capabilities: capabilities(),
         })
         .unwrap();
 
@@ -916,6 +1200,9 @@ u UU N... 100644 100644 100644 100644 1111111 2222222 3333333 conflict.txt
         assert_eq!(json["id"], 7);
         assert_eq!(json["version"], env!("CARGO_PKG_VERSION"));
         assert_eq!(json["protocol"], PROTOCOL_VERSION);
+        // The supervisor reads capabilities as a dictionary and answers
+        // HasCap() from it; a list would be discarded silently.
+        assert_eq!(json["capabilities"]["git-status"], true);
     }
 
     #[test]
@@ -1035,10 +1322,17 @@ u UU N... 100644 100644 100644 100644 1111111 2222222 3333333 conflict.txt
             .unwrap()
             .unwrap();
         match serde_json::from_str::<Request>(&line).unwrap() {
-            Request::GitInfo { id, path } => {
+            Request::GitInfo {
+                id,
+                path,
+                want_files,
+            } => {
                 assert_eq!(id, 42);
                 assert_eq!(path.len(), MAX_REQUEST_PATH_BYTES);
                 assert!(validate_request_path(&path).is_ok());
+                // Absent in the request above: a client that predates per-file
+                // status must keep parsing as it always did.
+                assert!(!want_files);
             }
             Request::Version { .. } => panic!("expected git_info request"),
         }

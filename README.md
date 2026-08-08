@@ -148,8 +148,12 @@ Refreshes are also triggered by buffer entry/write, directory changes, and focus
 | `g:simpletabline_item_sep` | `' \| '` | Separator for plain mode. |
 | `g:simpletabline_key_sep` | two spaces | Gap after indexes in plain mode. |
 | `g:simpletabline_ellipsis` | `' … '` | Hidden-buffer marker. |
+| `g:simpletabline_git_status` | `1` | Colour buffers by the Git state of their file. |
+| `g:simpletabline_git_status_icons` | `{}` | Glyph per state, e.g. `{'M': '●', 'A': '✚', 'D': '✖', 'U': '!'}`. |
 | `g:simpletabline_cyan_gui` | `'#00ffff'` | Active tabline accent (GUI/true color). |
 | `g:simpletabline_cyan_cterm` | `'14'` | Active tabline terminal accent. |
+
+With `g:simpletabline_git_status`, each buffer is painted by the state of its file in the repository the current buffer belongs to: `SimpleTablineGitModified` (linked to `DiffChange`), `SimpleTablineGitAdded` (`DiffAdd`), `SimpleTablineGitDeleted` (`DiffDelete`) and `SimpleTablineGitConflict` (`Error`). The current buffer keeps `SimpleTablineActive` — which buffer you are in matters more than its Git state — and `g:simpletabline_git_status_icons` adds a glyph when colour alone is not enough. This needs a daemon built from this version, which advertises a `git-status` capability; an older binary is never asked for the data, everything else keeps working, and `:SimpleLineHealth` says `git file status: on/unavailable`. Run `./install.sh` and `:SimpleLineRestart` to get it. Paths are capped at 2000 per repository.
 
 ## Commands
 
@@ -212,6 +216,8 @@ make check
 
 This runs Rust formatting, Clippy with warnings denied, all Rust tests, and the headless Vim suite. Individual targets are `make rust-test` and `make vim-test`.
 
-The daemon protocol is newline-delimited JSON. Vim first sends `{"type":"version","id":0}` and expects `{"type":"version","id":0,"version":"…","protocol":1}`. It then sends `{"type":"git_info","id":N,"path":"…"}` and receives a `git_info` event carrying the same `id` and path, or an `error` event. Request IDs are the source of truth for asynchronous cache placement. Paths are limited to 4096 UTF-8 bytes; an encoded request line is limited to 25,600 bytes.
+The daemon protocol is newline-delimited JSON. Vim first sends `{"type":"version","id":N}` and expects `{"type":"version","id":N,"version":"…","protocol":2,"capabilities":{…}}`. It then sends `{"type":"git_info","id":N,"path":"…"}` and receives a `git_info` event carrying the same `id` and path, or an `error` event. Request IDs are the source of truth for asynchronous cache placement. Paths are limited to 4096 UTF-8 bytes; an encoded request line is limited to 25,600 bytes.
 
 Protocol 1 has additive `git_info` fields: `conflicts` (unmerged entries), `stash` (stash count), and `operation` (an in-progress repository operation). Either side may be older: Vim treats missing fields as zero/empty, and unknown fields are ignored.
+
+Protocol 2 adds the `git-status` capability and three more additive `git_info` fields: `repo_root` (absolute worktree root), `files` (repository-relative path → `M`/`A`/`D`/`U`, capped at 2000 entries) and `files_truncated`. The map is only produced when the request carries `"want_files":true`, which Vim sends only after the capability is negotiated, so an older daemon is never asked and an older Vim never asks. Both protocol versions are accepted by the client, because the binary is rebuilt by `install.sh` while the Vim files arrive with the plugin manager: updating one and not the other must degrade, not break.

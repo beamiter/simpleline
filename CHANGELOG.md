@@ -29,6 +29,40 @@
 - 新增 `tests/vim/render_cache.vim`:逐项验证"状态没变必须命中"与"每个输入
   变化必须未命中且值正确"。
 
+### 新增:tabline 按每个文件的 Git 状态上色
+
+以前只知道"仓库里有 3 个文件改了",不知道"改的是不是我开着的这几个 buffer
+里的哪一个"。而 daemon 其实一直在解析 porcelain-v2 的每一条路径记录,解析完
+就把路径扔掉,只留计数。
+
+- daemon:`GitStatus` 增加 `files`(仓库相对路径 → `M`/`A`/`D`/`U`)、
+  `files_truncated` 与 `repo_root`。ordinary/rename/unmerged/untracked 四种
+  记录的路径偏移量各不相同,按字段个数定位,不按空白切分——路径里可以有空格,
+  切错了就是给错误的 buffer 上色,比不上色更糟。rename 取的是改名后的名字。
+- 路径上限 2000 条,超出后置 `files_truncated`;200k 个脏文件不该把一次刷新
+  变成几 MB 的 JSON 行。计数本身仍然覆盖整棵树,只有映射被截断。
+- `git` 调用加 `-c core.quotePath=false`:否则非 ASCII 路径会被 git 转义成
+  `"sub/b \321\201.txt"`,匹配 buffer 名前还得做一遍 C-unquote。中文文件名
+  不是边角情况。仍然被引号包起来的路径(含控制字符)直接丢弃。
+- `repo_root` 取的是持有 `.git` 标记的那个目录,普通仓库和 linked worktree
+  都对;`git_dir` 在 linked worktree 里指向主仓库内部,不能当根用。
+- 协议升到 2,并在握手回复里宣告 `capabilities: {"git-status": true}`。
+  supervisor 的 `HasCap()` 机制本来就 vendored 在那儿没人用,现在用上了。
+  客户端同时接受协议 1 和 2:二进制由 `install.sh` 重建,而 Vim 文件由插件
+  管理器更新,只更新一边的人应该降级,而不是直接坏掉。
+- `files` 只在请求里带 `want_files: true` 时才收集和序列化,而这个标志只在
+  能力协商成功后才发——旧 daemon 从来不会被问,新客户端也不会白付线上开销。
+- Vim:新增 `g:simpletabline_git_status`(默认 1)与
+  `g:simpletabline_git_status_icons`(默认 `{}`),以及四个高亮组
+  `SimpleTablineGitModified/GitAdded/GitDeleted/GitConflict`,分别 link 到
+  `DiffChange`/`DiffAdd`/`DiffDelete`/`Error`。当前 buffer 保持
+  `SimpleTablineActive`:你在哪个 buffer 比它的 Git 状态更重要。
+- 标记进了 tabline 备忘键,图标也进了——它们是渲染输入,漏掉渲染输入正是这个
+  插件反复犯的那类错。每个 buffer 的标记按 "buffer + 文件名" 缓存,只在 Git
+  数据真的变了才丢弃;经过 symlink 打开的文件会退一步用 `resolve()` 再匹配。
+- `:SimpleLineHealth` 增加一行:开关状态、能力是否协商成功、路径条数、是否
+  截断、仓库根。"为什么没上色"是这个功能唯一的支持负担。
+
 ### 新增:接住 simplegit 的 statusline API
 
 simplegit 现在发布 `b:simplegit_status_dict`(`{head, ahead, behind, added,
