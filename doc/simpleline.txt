@@ -204,7 +204,10 @@ directories (a recursive watch costs one inotify descriptor per directory, a
 finite per-user resource), when the platform watcher cannot start, or when
 the daemon already watches 16 directories. In the last case the oldest watch
 is withdrawn, the daemon says so, and that directory goes back on the poll.
-A refusal is not retried until the daemon restarts.
+A withdrawal is the price of a watch that is granted, and of nothing else: a
+refused watch withdraws no directory, so an over-sized or unwatchable worktree
+never costs a repository that is already watched. This matters because a
+refusal is not retried until the daemon restarts.
 
 Unsolicited events are the one exception to "every reply is correlated to its
 request by id". They carry id 0 and are correlated by path instead, against

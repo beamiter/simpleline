@@ -2,6 +2,27 @@
 
 ## Unreleased - 2026-08-08
 
+### 修复:被拒绝的 watch 不再吃掉一个已经生效的 watch
+
+守护进程最多同时 watch 16 个目录,满了就淘汰最老的那个。问题是淘汰发生在"这个
+新目录到底能不能 watch"判定之前:第 17 个目录如果是一个超过 4096 个子目录的巨型
+仓库(或者 `notify` 根本 watch 不上它),`WatchService::watch()` 已经把最老的那个
+踢掉了,然后才返回拒绝。于是守护进程一口气发出两条 `watching: false`,客户端的
+`OnWatchReply()` 把两个目录都写进 `s_git_watch_refused` —— 而 `MaybeWatch()` 在
+守护进程的整个生命周期里都不会清掉它。用户失去了一个仍在编辑的仓库的事件推送,
+换来的是零,而且除了 `:SimpleLineRestart` 没有别的办法拿回来。
+
+现在判定先做、授予后付:确认新的 watch 真的拿到手(树大小、`notify` 注册、条目
+写入全部成功)之后,才去淘汰最老的那个。拒绝一律 `withdrawn` 为空。
+
+- 新条目先入队再淘汰,而淘汰只从队首取,所以它不可能淘汰自己;和新目录共用同一
+  个仓库根的旧条目被淘汰时,那个 `notify` watch 也不会被顺手摘掉。
+- README 和 `:help simpleline-git-watch` 之前把淘汰描述成"授予第 17 个 watch 的
+  代价",这条路径上并不是;现在文档明说淘汰只为已授予的 watch 付账。
+- 测试:`a_refused_watch_does_not_cost_a_granted_one` 改动前是红的(它看到的是
+  `withdrawn == ["…/r0"]`);`a_granted_watch_past_the_cap_withdraws_the_oldest`
+  改动前后都是绿的 —— 它钉住的正是"淘汰本身没被顺手关掉"。
+
 ### 新增:`g:simpleline_sections` —— 用声明式布局取代写死的段落顺序
 
 `ActiveStatusline()` 之前是一串写死的拼接:mode、recording、git、hunks……想把

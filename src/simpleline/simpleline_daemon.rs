@@ -692,7 +692,9 @@ impl WatchService {
     }
 
     /// Grant a watch, returning whether it was granted plus the directories
-    /// evicted to make room. Refusal is not an error — the client polls.
+    /// evicted to make room. Refusal is not an error — the client polls — and
+    /// a refusal evicts nothing: the returned list is empty unless the watch
+    /// was granted.
     fn watch(&mut self, path: &str, want_files: bool) -> (bool, Vec<String>) {
         if self.is_watched(path) {
             self.set_want_files(path, want_files);
@@ -704,22 +706,23 @@ impl WatchService {
             return (false, Vec::new());
         };
         let root = repo.worktree_root;
-        let mut withdrawn = Vec::new();
-        while self.order.len() >= MAX_WATCHED_DIRS {
-            let Some(oldest) = self.order.front().cloned() else {
-                break;
-            };
-            self.drop_dir(&oldest);
-            withdrawn.push(oldest);
-        }
-        if !self.roots.contains_key(&root)
+        // Decide the grant before spending anything on it. A refusal that has
+        // already evicted the oldest watch costs a directory the user is still
+        // editing and buys nothing: the client records a refusal permanently
+        // (`MaybeWatch()` never retries one) and the evicted directory falls
+        // back to polling for the life of the daemon process.
+        let fresh_root = !self.roots.contains_key(&root);
+        if fresh_root
             && (count_dirs_bounded(&root, MAX_WATCH_TREE_DIRS) > MAX_WATCH_TREE_DIRS
                 || self.watcher.watch(&root, RecursiveMode::Recursive).is_err())
         {
-            return (false, withdrawn);
+            return (false, Vec::new());
         }
         let Ok(mut map) = self.dirs.lock() else {
-            return (false, withdrawn);
+            if fresh_root {
+                let _ = self.watcher.unwatch(&root);
+            }
+            return (false, Vec::new());
         };
         map.insert(
             path.to_string(),
@@ -731,6 +734,18 @@ impl WatchService {
         drop(map);
         *self.roots.entry(root).or_insert(0) += 1;
         self.order.push_back(path.to_string());
+        // The watch is granted; only now does it displace an older one. The new
+        // entry is at the back and eviction takes from the front, so it can
+        // never evict itself, and an entry sharing the new root keeps the
+        // notify watch alive across the swap.
+        let mut withdrawn = Vec::new();
+        while self.order.len() > MAX_WATCHED_DIRS {
+            let Some(oldest) = self.order.front().cloned() else {
+                break;
+            };
+            self.drop_dir(&oldest);
+            withdrawn.push(oldest);
+        }
         (true, withdrawn)
     }
 
@@ -1167,10 +1182,11 @@ async fn main() -> std::process::ExitCode {
 mod tests {
     use super::{
         Event, GIT_REPOSITORY_ENV_VARS, GitStatus, MAX_REQUEST_LINE_BYTES, MAX_REQUEST_PATH_BYTES,
-        MAX_TRACKED_PATHS, MAX_WATCH_TREE_DIRS, PROTOCOL_VERSION, Request, WatchEntry,
-        capabilities, count_dirs_bounded, detect_git_operation, discover_repo, git_status_command,
-        git_version_supports_show_stash, interpret_status_failure, owning_root, parse_git_status,
-        read_request_line, run, validate_request_path,
+        MAX_TRACKED_PATHS, MAX_WATCH_TREE_DIRS, MAX_WATCHED_DIRS, PROTOCOL_VERSION, Request,
+        WatchEntry, WatchService, capabilities, count_dirs_bounded, detect_git_operation,
+        discover_repo, git_status_command, git_version_supports_show_stash,
+        interpret_status_failure, owning_root, parse_git_status, read_request_line, run,
+        validate_request_path,
     };
     use std::collections::{BTreeMap, HashMap};
     use std::path::{Path, PathBuf};
@@ -1838,6 +1854,103 @@ u UU N... 100644 100644 100644 100644 1111111 2222222 3333333 conflict.txt
         assert_eq!(count_dirs_bounded(&root, 3), 4);
 
         std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// A directory that `discover_repo` accepts, addressed the way the daemon
+    /// will see it: canonical, so the watch key and the discovered root agree.
+    fn make_repo(parent: &Path, name: &str) -> String {
+        let dir = parent.join(name);
+        std::fs::create_dir_all(dir.join(".git")).unwrap();
+        std::fs::canonicalize(&dir)
+            .unwrap()
+            .to_string_lossy()
+            .into_owned()
+    }
+
+    /// `None` on a machine with no usable filesystem watcher — a container out
+    /// of inotify quota, a filesystem that notifies about nothing. Skipping is
+    /// the honest outcome there; there is no watch service to make claims about.
+    /// The receiver comes back with the service: the debounce task pushes into
+    /// the other end, and dropping it early would turn a push into a send error.
+    fn watch_service() -> Option<(WatchService, tokio::sync::mpsc::Receiver<String>)> {
+        let (out, rx) = tokio::sync::mpsc::channel::<String>(64);
+        Some((WatchService::start(out)?, rx))
+    }
+
+    /// Eviction is the price of granting the 17th watch, which is what the
+    /// README and `:help simpleline-git-watch` promise.
+    #[tokio::test]
+    async fn a_granted_watch_past_the_cap_withdraws_the_oldest() {
+        let base = scratch_dir("watchevict");
+        let Some((mut service, _events)) = watch_service() else {
+            eprintln!("skipped: no platform watcher available");
+            std::fs::remove_dir_all(&base).unwrap();
+            return;
+        };
+
+        let granted: Vec<String> = (0..MAX_WATCHED_DIRS)
+            .map(|index| {
+                let dir = make_repo(&base, &format!("r{index}"));
+                assert_eq!(service.watch(&dir, false), (true, Vec::new()));
+                dir
+            })
+            .collect();
+
+        let extra = make_repo(&base, "extra");
+        assert_eq!(
+            service.watch(&extra, false),
+            (true, vec![granted[0].clone()])
+        );
+        assert!(!service.is_watched(&granted[0]));
+        assert!(service.is_watched(&granted[1]));
+        assert!(service.is_watched(&extra));
+
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    /// ...and only of granting it. A refusal decided after the eviction spends
+    /// a watch the user is still using on a watch nobody gets: the client
+    /// writes both directories into `s_git_watch_refused`, which nothing clears
+    /// short of `:SimpleLineRestart`, so the evicted repository loses
+    /// event-driven updates for the rest of the session in exchange for
+    /// nothing. The over-sized worktree is the case that proves it — that
+    /// refusal takes no watch descriptor at all, so it cannot need one freed.
+    #[tokio::test]
+    async fn a_refused_watch_does_not_cost_a_granted_one() {
+        let base = scratch_dir("watchrefuse");
+        let Some((mut service, _events)) = watch_service() else {
+            eprintln!("skipped: no platform watcher available");
+            std::fs::remove_dir_all(&base).unwrap();
+            return;
+        };
+
+        let granted: Vec<String> = (0..MAX_WATCHED_DIRS)
+            .map(|index| {
+                let dir = make_repo(&base, &format!("r{index}"));
+                assert_eq!(service.watch(&dir, false), (true, Vec::new()));
+                dir
+            })
+            .collect();
+
+        // A worktree past MAX_WATCH_TREE_DIRS: 1 root + 1 `.git` + the rest.
+        let huge = make_repo(&base, "huge");
+        for index in 0..MAX_WATCH_TREE_DIRS {
+            std::fs::create_dir(Path::new(&huge).join(format!("d{index}"))).unwrap();
+        }
+
+        assert_eq!(
+            service.watch(&huge, false),
+            (false, Vec::new()),
+            "a refused watch must withdraw nothing"
+        );
+        for dir in &granted {
+            assert!(
+                service.is_watched(dir),
+                "{dir} was evicted for a watch that was never granted"
+            );
+        }
+
+        std::fs::remove_dir_all(&base).unwrap();
     }
 
     async fn next_event(
