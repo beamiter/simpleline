@@ -1852,6 +1852,11 @@ u UU N... 100644 100644 100644 100644 1111111 2222222 3333333 conflict.txt
         // 11-directory fixture, so it holds with the early return deleted --
         // which is the whole of what this test exists to catch.
         assert_eq!(count_dirs_bounded(&root, 3), 4);
+        // At exactly the limit the walk still finishes and reports the true
+        // count. The caller refuses on `> limit`, so a count that stopped one
+        // directory early here would read as over-sized and refuse a tree that
+        // is precisely the documented maximum.
+        assert_eq!(count_dirs_bounded(&root, 11), 11);
 
         std::fs::remove_dir_all(&root).unwrap();
     }
@@ -1949,6 +1954,63 @@ u UU N... 100644 100644 100644 100644 1111111 2222222 3333333 conflict.txt
                 "{dir} was evicted for a watch that was never granted"
             );
         }
+
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    /// README.md and `:help simpleline-git-watch` promise a refusal for a
+    /// worktree of *more than* MAX_WATCH_TREE_DIRS directories, which makes a
+    /// worktree of exactly that many the largest one still watched. Nothing
+    /// else in this file sits near the boundary -- the over-sized fixtures are
+    /// past it and every other repository is tiny -- so widening the gate by a
+    /// single directory (`>` becoming `>=`) leaves the suite green while
+    /// silently condemning a legitimate worktree to polling: the client records
+    /// the refusal in `s_git_watch_refused` and never retries it for the life
+    /// of the daemon process. Both sides of the comparison are asserted here so
+    /// that neither direction of that slip can pass.
+    #[tokio::test]
+    async fn the_directory_limit_is_the_largest_worktree_still_watched() {
+        let base = scratch_dir("watchboundary");
+        let Some((mut service, _events)) = watch_service() else {
+            eprintln!("skipped: no platform watcher available");
+            std::fs::remove_dir_all(&base).unwrap();
+            return;
+        };
+
+        // `make_repo` already costs two directories: the worktree root and its
+        // `.git`. Top it up to exactly the limit, then to exactly one over.
+        let exact = make_repo(&base, "exact");
+        for index in 0..MAX_WATCH_TREE_DIRS - 2 {
+            std::fs::create_dir(Path::new(&exact).join(format!("d{index}"))).unwrap();
+        }
+        let over = make_repo(&base, "over");
+        for index in 0..MAX_WATCH_TREE_DIRS - 1 {
+            std::fs::create_dir(Path::new(&over).join(format!("d{index}"))).unwrap();
+        }
+        // The fixtures really do straddle the boundary; without this the two
+        // grant assertions below could be agreeing about the wrong tree sizes.
+        assert_eq!(
+            count_dirs_bounded(Path::new(&exact), MAX_WATCH_TREE_DIRS),
+            MAX_WATCH_TREE_DIRS
+        );
+        assert_eq!(
+            count_dirs_bounded(Path::new(&over), MAX_WATCH_TREE_DIRS),
+            MAX_WATCH_TREE_DIRS + 1
+        );
+
+        assert_eq!(
+            service.watch(&exact, false),
+            (true, Vec::new()),
+            "a worktree of exactly MAX_WATCH_TREE_DIRS directories is at the \
+             documented maximum, not past it, and must still be watched"
+        );
+        assert!(service.is_watched(&exact));
+        assert_eq!(
+            service.watch(&over, false),
+            (false, Vec::new()),
+            "one directory past the limit is over it"
+        );
+        assert!(!service.is_watched(&over));
 
         std::fs::remove_dir_all(&base).unwrap();
     }
