@@ -1831,8 +1831,11 @@ u UU N... 100644 100644 100644 100644 1111111 2222222 3333333 conflict.txt
         assert_eq!(count_dirs_bounded(&root, MAX_WATCH_TREE_DIRS), 11);
         // Over the limit the exact count is never computed: the answer is only
         // ever compared against the limit, and walking a monorepo to produce a
-        // number nobody reads is the cost this bound exists to avoid.
-        assert!(count_dirs_bounded(&root, 3) > 3);
+        // number nobody reads is the cost this bound exists to avoid. Only the
+        // exact value pins that. `> 3` is just as true of a full walk of this
+        // 11-directory fixture, so it holds with the early return deleted --
+        // which is the whole of what this test exists to catch.
+        assert_eq!(count_dirs_bounded(&root, 3), 4);
 
         std::fs::remove_dir_all(&root).unwrap();
     }
