@@ -36,6 +36,11 @@ var s_git_refresh_again: dict<bool> = {}
 var s_git_watched: dict<bool> = {}
 var s_git_watch_pending: dict<bool> = {}
 var s_git_watch_refused: dict<bool> = {}
+# The want_files each watch was last asked for.  A push answers no request, so
+# the flag travels with the watch and then stays frozen in the daemon; this is
+# what lets MaybeWatch() notice that the options have moved away from what the
+# daemon was told and re-send the watch to say so.
+var s_git_watch_files: dict<bool> = {}
 
 # UI state owned by the user, restored exactly when Simpleline is disabled.
 var s_saved_global_statusline: string = ''
@@ -2070,6 +2075,7 @@ def ClearPending()
   s_git_watched = {}
   s_git_watch_pending = {}
   s_git_watch_refused = {}
+  s_git_watch_files = {}
 enddef
 
 def TakePending(id: number): string
@@ -2232,6 +2238,9 @@ def OnWatchReply(ev: dict<any>)
   endif
   if has_key(s_git_watched, path)
     remove(s_git_watched, path)
+  endif
+  if has_key(s_git_watch_files, path)
+    remove(s_git_watch_files, path)
   endif
   s_git_watch_refused[path] = true
   # The directory is back on the poll and nothing has reported it since the
@@ -2415,15 +2424,27 @@ def MaybeWatch(dir: string)
   if !WantWatch()
     return
   endif
-  if has_key(s_git_watched, dir) || has_key(s_git_watch_pending, dir)
-        \ || has_key(s_git_watch_refused, dir)
+  if has_key(s_git_watch_pending, dir) || has_key(s_git_watch_refused, dir)
+    return
+  endif
+  # want_files travels with the watch: a push is not answering a git_info
+  # request, so there is no later request left to carry it.  Which means a
+  # watch granted once would keep the answer it was granted with forever, and
+  # the options it came from can change under it in either direction: turn the
+  # tabline marks on and every push arrives with `files: {}`, wiping the marks
+  # a BufEnter refresh just collected; turn them off and the daemon goes on
+  # collecting, serializing and shipping up to 2000 paths per push for a
+  # tabline that no longer exists.  Re-sending the watch is the renegotiation —
+  # the daemon updates the entry in place and re-grants it — and a watched
+  # directory has nothing else that would ever reach the daemon again.
+  var want_files = WantFileStatus()
+  if has_key(s_git_watched, dir) && get(s_git_watch_files, dir, false) == want_files
     return
   endif
   var id = NextId()
-  # want_files travels with the watch: a push is not answering a git_info
-  # request, so there is no later request left to carry it.
-  if SendReq({type: 'watch', id: id, path: dir, want_files: WantFileStatus()})
+  if SendReq({type: 'watch', id: id, path: dir, want_files: want_files})
     s_git_watch_pending[dir] = true
+    s_git_watch_files[dir] = want_files
   endif
 enddef
 
@@ -2452,6 +2473,11 @@ def GitTimerCb(_id: number)
   # asked about.  Polling it anyway would spawn `git status` over the worktree
   # every interval to learn what the daemon has already undertaken to say.
   if has_key(s_git_watched, dir)
+    # The terms of the watch still have to follow the options, though, and this
+    # is the only thing that runs for a directory nothing asks about: without
+    # it, want_files would only ever be renegotiated by an autocommand that
+    # happened to fire afterwards, or not at all.
+    MaybeWatch(dir)
     return
   endif
   RequestGitDir(dir)

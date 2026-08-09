@@ -209,6 +209,13 @@ request by id". They carry id 0 and are correlated by path instead, against
 the directories this client asked to watch and the daemon confirmed; an event
 for anything else is discarded.
 
+A push answers no request, so whether the daemon should collect the per-file
+paths travels with the watch itself (see |simpleline-tabline-git-status|). A
+watched directory sends no further request that could carry a changed answer,
+so the watch is re-sent whenever g:simpletabline_git_status or
+g:simpleline_tabline turns the marks on or off — within one
+g:simpleline_git_interval at the latest, and without the watch being dropped.
+
 :SimpleLineHealth reports "git watch: on/negotiated, N dir(s) watched" and
 whether the current directory is watched or polled.
 
@@ -268,9 +275,11 @@ are capped at 2000 per repository, after which health says "(truncated)".
 The paths are only requested while something can paint them. With
 g:simpletabline_git_status off — or with g:simpleline_tabline off, which means
 no tabline is rendered at all — the request carries no "want_files" and the
-daemon collects nothing; the Git segment of the statusline is unaffected. The
-first half of health's "git file status:" line answers "would anything paint a
-mark", the second "can the daemon supply one".
+daemon collects nothing; the Git segment of the statusline is unaffected.
+Turning either option on or off after the fact takes effect on a watched
+directory too: the watch is re-sent with the new answer (see
+|simpleline-git-watch|). The first half of health's "git file status:" line
+answers "would anything paint a mark", the second "can the daemon supply one".
 
 ===============================================================================
 INTEGRATIONS                                         *simpleline-integrations*

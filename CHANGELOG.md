@@ -2,6 +2,45 @@
 
 ## Unreleased - 2026-08-08
 
+### 修复:watch 之后再改 tabline 选项,want_files 不会跟着变
+
+`want_files` 是随 `watch` 请求一起发过去的——主动推送不回答任何请求,所以没有
+后面的请求能再带上一个新答案。可 `MaybeWatch()` 对已经 watch 的目录直接 return,
+于是那个答案在 daemon 里被永久冻住,而被 watch 的目录又不再轮询,没有任何东西
+会再碰它。两个方向都错:
+
+- 启动时 `g:simpletabline_git_status = 0`,之后再打开——watch 仍然是
+  `want_files:false`,每一条推送都带着 `files: {}`,把 `BufEnter`/`BufWritePost`
+  刚收集到的逐文件标记又抹掉一次。
+- 默认(标记开着)先协商成 `want_files:true`,之后关掉 `g:simpletabline_git_status`
+  或 `g:simpleline_tabline`——daemon 还是每次推送都收集、序列化、发送最多 2000 个
+  路径,而文档在 `doc/simpleline.txt` 和 README 里是无条件承诺"关掉之后请求不带
+  `want_files`,daemon 什么都不收集"的。
+
+现在客户端记住每个 watch 最后发出去的 `want_files`,发现和当前选项不一致就重发
+一次 `watch`(daemon 的 `set_want_files()` 本来就认这条路径,会原地改掉并重新
+grant,目录不会掉回轮询)。轮询计时器对被 watch 的目录本来直接 return,现在改为
+先走一次这个检查——那是这种目录上唯一还会运行的东西,所以选项改了之后最多一个
+`g:simpleline_git_interval` 就会生效,不必等某个 autocommand 恰好触发。
+
+- 测试:新增 `tests/vim/git_watch_files.vim`。假 daemon 记录每一条请求,断言首次
+  watch 带 `want_files:false`、打开标记后重发一次带 `true`、关掉之后由计时器再
+  重发一次带 `false`、答案没变时一条都不发,以及 `g:simpleline_tabline` 这一侧
+  同样算数;重发前后 `git_info` 请求数不变,证明目录没有掉回轮询。修改前这个
+  文件有五处断言是红的。
+
+### 修复:`tests/vim/git_watch.vim` 里"推送不进缓存"那条断言其实抓不到东西
+
+那条断言是在 withdraw 之后对当前目录注入的,而 withdraw 已经把目录放回 250ms
+轮询——`sleep 300m` 期间一条正常的 `git_info` 回复就把错误写进去的缓存项覆盖掉
+了,所以把 `OnGitInfo()` 里的 path 关联整个删掉,测试照样是绿的。
+
+- 新增一条断言:在目录**仍然被 watch** 的时候,让 daemon 推一条**邻近路径**的
+  事件。那个路径没有人轮询,错误接受的结果会一直留在缓存里,断言直接看
+  `:SimpleLineDebug` 的 `git_cache:` 那一行。删掉 path 关联时这条断言必红。
+- withdraw 之后那条保留,但改成 300ms 内每 10ms 采样一次,而不是等尘埃落定再看
+  一眼。
+
 ### 新增:daemon 可以主动上报 Git 变化,不必再按周期轮询
 
 原来的刷新模型是每 2000ms 对当前目录跑一次 `git status`——不管有没有变化,

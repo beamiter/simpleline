@@ -21,12 +21,21 @@ call writefile(['x'], s:repo . '/file.txt')
 execute 'cd ' . fnameescape(s:repo)
 let s:request_path = substitute(fnamemodify(getcwd(), ':p'), '/$', '', '')
 
-function! s:Git(id, branch) abort
-  return '{"type":"git_info","id":' . a:id . ',"path":"' . s:request_path . '"'
+" A neighbouring directory this client never asks about: the daemon pushing an
+" event for it is the case the path correlation exists to reject, and unlike a
+" push for the current directory nothing can ever overwrite the result.
+let s:stray_path = s:request_path . '/sub'
+
+function! s:GitAt(id, branch, path) abort
+  return '{"type":"git_info","id":' . a:id . ',"path":"' . a:path . '"'
         \ . ',"branch":"' . a:branch . '","dirty":false,"added":0,"modified":0'
         \ . ',"deleted":0,"conflicts":0,"stash":0,"operation":"","ahead":0'
         \ . ',"behind":0,"is_git":true,"files":{},"files_truncated":false'
         \ . ',"repo_root":"' . s:repo . '"}'
+endfunction
+
+function! s:Git(id, branch) abort
+  return s:GitAt(a:id, a:branch, s:request_path)
 endfunction
 
 " `caps` decides whether watching is advertised, `grant` whether a watch
@@ -62,6 +71,8 @@ function! s:Daemon(caps, grant, log) abort
         \ '    *''"type":"withdraw"''*) : > ' . shellescape(l:marker)
         \   . '; printf ' . shellescape(l:withdraw . '\n') . ' ;;',
         \ '    *''"type":"inject"''*) printf ' . shellescape(s:Git(0, 'injected') . '\n') . ' ;;',
+        \ '    *''"type":"stray"''*) printf '
+        \   . shellescape(s:GitAt(0, 'injected', s:stray_path) . '\n') . ' ;;',
         \ '    *''"type":"watch"''*)',
         \ '      if [ -f ' . shellescape(l:marker) . ' ]; then',
         \ '        printf ' . shellescape(l:refused . '\n') . ' "$id"',
@@ -78,6 +89,12 @@ endfunction
 
 function! s:Requests(log, type) abort
   return filter(readfile(a:log), 'v:val =~# ''"type":"' . a:type . '"''')
+endfunction
+
+" The whole Git cache, keys included — the only view of what an event wrote
+" that does not depend on which directory happens to be current.
+function! s:Cache() abort
+  return matchstr(execute('SimpleLineDebug'), 'git_cache: .*')
 endfunction
 
 let g:simpleline_auto_enable = 0
@@ -112,6 +129,20 @@ sleep 1
 call assert_equal(s:polled, len(s:Requests(s:log, 'git_info')),
       \ 'a watched directory is not polled')
 
+" Granting a watch for one directory does not license pushes for another: the
+" push carries a path and it is checked against what this client asked to
+" watch. The neighbouring path is asserted on rather than the current one
+" because nothing ever polls it, so a wrongly accepted event stays in the cache
+" to be seen instead of being overwritten by the next legitimate reply.
+call simpleline#core#Send({'type': 'stray', 'id': 0})
+sleep 300m
+call assert_notmatch('injected', s:Cache(),
+      \ 'a push for a path this client never watched never reaches the cache')
+call assert_notmatch(escape(s:stray_path, '.*[]~\'), s:Cache(),
+      \ 'and leaves no cache entry of its own')
+call assert_match('pushed', simpleline#ActiveStatusline(),
+      \ 'the watched directory keeps the value its own push gave it')
+
 " A withdrawn watch — the daemon keeps a bounded number of them, so a session
 " that visits many repositories has the oldest dropped — puts the directory
 " back on the poll rather than leaving it silently frozen.
@@ -129,9 +160,21 @@ call assert_true(len(s:Requests(s:log, 'git_info')) > s:resumed,
 " cache for anywhere.
 let s:before = simpleline#ActiveStatusline()
 call simpleline#core#Send({'type': 'inject', 'id': 0})
-sleep 300m
-call assert_equal(s:before, simpleline#ActiveStatusline(),
+" Sampled rather than looked at once when the dust settles: this directory is
+" back on the 250ms poll, and a reply carrying the real branch would overwrite
+" a wrongly accepted push long before a single late assertion could see it —
+" which would leave the assertion passing with the correlation deleted.
+let s:saw_injected = 0
+for s:tick in range(40)
+  sleep 10m
+  if s:Cache() =~# 'injected'
+    let s:saw_injected = 1
+    break
+  endif
+endfor
+call assert_equal(0, s:saw_injected,
       \ 'a push for an unwatched path never reaches the cache')
+call assert_equal(s:before, simpleline#ActiveStatusline())
 call assert_notmatch('injected', simpleline#ActiveStatusline())
 
 call simpleline#Stop()
