@@ -70,6 +70,14 @@ g:simpleline_filetype_icons = get(g:, 'simpleline_filetype_icons', {})
 # policy shared with the buffer tabline. Runtime reads validate the value too,
 # so changing it before :SimpleLineReload cannot poison the statusline.
 g:simpleline_filename_mode = get(g:, 'simpleline_filename_mode', 'native')
+# Declarative statusline layout: {left: [...], right: [...]} of segment names,
+# inline {fn, hl} dicts, or names registered with simpleline#RegisterSegment().
+# Empty means "the built-in order"; a side left out keeps its default, so
+# overriding one side does not blank the other.
+g:simpleline_sections = get(g:, 'simpleline_sections', {})
+# Per-kind overrides, keyed by 'filetype' first and 'buftype' second so that one
+# entry can cover every scratch buffer without naming each filetype.
+g:simpleline_sections_filetype = get(g:, 'simpleline_sections_filetype', {})
 
 # =============================================================
 # Tabline configuration (merged from simpletabline)

@@ -410,6 +410,65 @@ def DictBool(entry: dict<any>, name: string, default_val: bool): bool
   return default_val
 enddef
 
+# Evaluate one user-provided {fn, hl, compact} entry.  The shape is shared by
+# g:simpleline_custom_left/_right, an inline entry in g:simpleline_sections and
+# anything handed to simpleline#RegisterSegment(), so it lives in one place; an
+# empty dict means "render nothing", whether because the provider is absent,
+# returned nothing, or threw.  Padding is deliberately left to the caller: the
+# two configurations that emit these disagree about it (see RenderSection()).
+def CustomSegment(entry: dict<any>, default_hl: string, compact: bool): dict<string>
+  if compact && !DictBool(entry, 'compact', true)
+    return {}
+  endif
+
+  var fn = get(entry, 'fn', '')
+  var Target: any = fn
+  if type(fn) == v:t_string
+    # A bare name resolves script-locally inside this Vim9 script, while
+    # user providers live in the global namespace.
+    if fn !=# '' && !exists('*' .. fn) && exists('*g:' .. fn)
+      Target = 'g:' .. fn
+    elseif fn ==# '' || !exists('*' .. fn)
+      # A provider whose plugin is not loaded is silently absent, not an
+      # error.
+      return {}
+    endif
+  elseif type(fn) == v:t_func
+    # function('Name') stores only the bare name, which has the same
+    # script-local resolution problem once it is called from here.
+    var fn_name = get(fn, 'name', '')
+    if fn_name =~# '^\a\w*$'
+          \ && !exists('*' .. fn_name)
+          \ && exists('*g:' .. fn_name)
+      var fn_args = get(fn, 'args', [])
+      var fn_dict = get(fn, 'dict', {})
+      Target = empty(fn_dict)
+            \ ? function('g:' .. fn_name, fn_args)
+            \ : function('g:' .. fn_name, fn_args, fn_dict)
+    endif
+  else
+    DebugLog('custom segment fn must be a function name or Funcref')
+    return {}
+  endif
+
+  var text: any
+  try
+    text = call(Target, [])
+  catch
+    DebugLog('custom segment failed: ' .. v:exception)
+    return {}
+  endtry
+  if type(text) != v:t_string || text ==# ''
+    return {}
+  endif
+
+  var hl = get(entry, 'hl', default_hl)
+  if type(hl) != v:t_string || hl !~# '^\w\+$'
+    hl = default_hl
+  endif
+  return {hl: hl, text: RenderEscape(text)}
+enddef
+
 def CustomSegments(config_name: string, default_hl: string): list<dict<string>>
   var entries = get(g:, config_name, [])
   if type(entries) != v:t_list
@@ -424,56 +483,10 @@ def CustomSegments(config_name: string, default_hl: string): list<dict<string>>
       DebugLog('custom segment must be a dict')
       continue
     endif
-    if compact && !DictBool(entry, 'compact', true)
-      continue
+    var one = CustomSegment(entry, default_hl, compact)
+    if !empty(one)
+      rendered->add(one)
     endif
-
-    var fn = get(entry, 'fn', '')
-    var Target: any = fn
-    if type(fn) == v:t_string
-      # A bare name resolves script-locally inside this Vim9 script, while
-      # user providers live in the global namespace.
-      if fn !=# '' && !exists('*' .. fn) && exists('*g:' .. fn)
-        Target = 'g:' .. fn
-      elseif fn ==# '' || !exists('*' .. fn)
-        # A provider whose plugin is not loaded is silently absent, not an
-        # error.
-        continue
-      endif
-    elseif type(fn) == v:t_func
-      # function('Name') stores only the bare name, which has the same
-      # script-local resolution problem once it is called from here.
-      var fn_name = get(fn, 'name', '')
-      if fn_name =~# '^\a\w*$'
-            \ && !exists('*' .. fn_name)
-            \ && exists('*g:' .. fn_name)
-        var fn_args = get(fn, 'args', [])
-        var fn_dict = get(fn, 'dict', {})
-        Target = empty(fn_dict)
-              \ ? function('g:' .. fn_name, fn_args)
-              \ : function('g:' .. fn_name, fn_args, fn_dict)
-      endif
-    else
-      DebugLog('custom segment fn must be a function name or Funcref')
-      continue
-    endif
-
-    var text: any
-    try
-      text = call(Target, [])
-    catch
-      DebugLog('custom segment failed: ' .. v:exception)
-      continue
-    endtry
-    if type(text) != v:t_string || text ==# ''
-      continue
-    endif
-
-    var hl = get(entry, 'hl', default_hl)
-    if type(hl) != v:t_string || hl !~# '^\w\+$'
-      hl = default_hl
-    endif
-    rendered->add({hl: hl, text: RenderEscape(text)})
   endfor
   return rendered
 enddef
@@ -737,6 +750,10 @@ def ResetRenderCaches()
   s_diag_provider = 'none'
   s_diag_hits = 0
   s_diag_misses = 0
+  # Unknown segment names are reported once each, so a user who reloads after
+  # fixing a layout typo hears about it again if the second spelling is wrong
+  # too — and :SimpleLineHealth stops naming a name that is no longer in use.
+  s_unknown_segments = {}
 enddef
 
 # Hit counts for the two per-redraw memos, so the win is observable rather
@@ -808,83 +825,108 @@ enddef
 # =============================================================
 # Statusline builder
 # =============================================================
-export def ActiveStatusline(): string
-  var s = ''
-  var compact = IsCompact()
+# ----------- Built-in segments -----------
+#
+# Each built-in returns its whole rendered chunk — highlight group, text and the
+# separator glyph that follows it — because the separator belongs to the segment
+# that emits it: a powerline wedge is drawn in one section's colour on the next
+# section's background, so a segment that returned bare text would leave the
+# walk below guessing which two groups meet.  That is also why the golden
+# strings in tests/vim/sections.vim pin the separators rather than only the
+# order.
+#
+# Built-ins are `raw`: they legitimately emit Vim format items (%f, %l:%c,
+# %{...}) and must not be escaped.  They are a closed set for exactly that
+# reason — a user-supplied segment always goes through RenderEscape(), and
+# letting a registration take a built-in name would hand a user's return value
+# the raw treatment, turning a layout option into a format-injection hole.
 
-  # Mode
-  var mode_spec = ModeSpec()
-  s ..= '%#' .. mode_spec[1] .. '# ' .. mode_spec[0] .. ' '
-  s ..= '%#' .. mode_spec[2] .. '#' .. s_sep_l
+def SegMode(): string
+  var spec = ModeSpec()
+  return '%#' .. spec[1] .. '# ' .. spec[0] .. ' %#' .. spec[2] .. '#' .. s_sep_l
+enddef
 
-  # Macro recording indicator
+def SegRecording(): string
   var recording = RecordingStr()
-  if recording !=# ''
-    s ..= '%#SimpleLineRec# ' .. RenderEscape(recording) .. ' '
-  endif
+  return recording ==# '' ? '' : '%#SimpleLineRec# ' .. RenderEscape(recording) .. ' '
+enddef
 
-  # Git info
+def SegGit(): string
   var git = GitStr()
-  if git !=# ''
-    s ..= '%#SimpleLineGit# ' .. git .. ' '
-  endif
+  return git ==# '' ? '' : '%#SimpleLineGit# ' .. git .. ' '
+enddef
 
-  # Per-file hunk counts, when simplegit is there to provide them.  They sit in
-  # their own group next to the repository segment precisely because they count
-  # something else: lines in this file, not files in the worktree.
+# Per-file hunk counts, when simplegit is there to provide them.  They sit in
+# their own group next to the repository segment precisely because they count
+# something else: lines in this file, not files in the worktree.
+def SegHunks(): string
   var hunks = HunkStr()
-  if hunks !=# ''
-    s ..= '%#SimpleLineHunks# ' .. hunks .. ' '
-  endif
+  return hunks ==# '' ? '' : '%#SimpleLineHunks# ' .. hunks .. ' '
+enddef
 
-  # Diagnostics (coc.nvim / ALE / vim-lsp)
-  if ConfBool('simpleline_show_diagnostics', true)
-    var diag = DiagnosticCounts()
-    if diag.error > 0
-      s ..= '%#SimpleLineDiagError# E:' .. diag.error .. ' '
-    endif
-    if diag.warning > 0
-      s ..= '%#SimpleLineDiagWarn# W:' .. diag.warning .. ' '
-    endif
+# Diagnostics (coc.nvim / ALE / vim-lsp)
+def SegDiagnostics(): string
+  if !ConfBool('simpleline_show_diagnostics', true)
+    return ''
   endif
+  var diag = DiagnosticCounts()
+  var out = ''
+  if diag.error > 0
+    out ..= '%#SimpleLineDiagError# E:' .. diag.error .. ' '
+  endif
+  if diag.warning > 0
+    out ..= '%#SimpleLineDiagWarn# W:' .. diag.warning .. ' '
+  endif
+  return out
+enddef
 
-  # User-provided left segments sit beside Git/diagnostics, before the
-  # filename truncation point.  This makes project/task state visible without
-  # competing with file metadata and position on the right.
-  for segment in CustomSegments('simpleline_custom_left', 'SimpleLineMid')
-    s ..= '%#' .. segment.hl .. '# ' .. segment.text .. ' '
+# The two legacy segment lists.  They keep their own ' text ' padding, which the
+# section walk does not apply to its own entries: this rendering predates
+# sections and users' lines are built around it.
+def RenderCustomList(config_name: string, default_hl: string): string
+  var out = ''
+  for segment in CustomSegments(config_name, default_hl)
+    out ..= '%#' .. segment.hl .. '# ' .. segment.text .. ' '
   endfor
+  return out
+enddef
 
-  # Middle: filename. %< marks the truncation point so a long path is shortened
-  # here instead of Vim eating the mode/git segments from the left.
-  s ..= '%#SimpleLineMid#'
-  s ..= ' ' .. RenderEscape(FtIcon()) .. '%<' .. StatusFilename()
-  s ..= '%( %m%r%)'
+# User-provided left segments sit beside Git/diagnostics, before the filename
+# truncation point.  This makes project/task state visible without competing
+# with file metadata and position on the right.
+def SegCustomLeft(): string
+  return RenderCustomList('simpleline_custom_left', 'SimpleLineMid')
+enddef
 
-  # Separator to background
-  s ..= '%#SimpleLineMidSep#' .. s_sep_l
+def SegCustomRight(): string
+  return RenderCustomList('simpleline_custom_right', 'SimpleLineRight')
+enddef
 
-  # Right align
-  s ..= '%='
+# Middle: filename.  %< marks the truncation point so a long path is shortened
+# here instead of Vim eating the mode/git segments from the left.
+def SegFilename(): string
+  return '%#SimpleLineMid# ' .. RenderEscape(FtIcon()) .. '%<' .. StatusFilename()
+        \ .. '%( %m%r%)' .. '%#SimpleLineMidSep#' .. s_sep_l
+enddef
 
-  # Search count while highlighting is active
+# Search count while highlighting is active
+def SegSearch(): string
   var search = SearchStr()
-  if search !=# ''
-    s ..= '%#SimpleLineSearch# ' .. search .. ' '
-  endif
+  return search ==# '' ? '' : '%#SimpleLineSearch# ' .. search .. ' '
+enddef
 
-  # LSP status (simplecc compatibility provider)
+# LSP status (simplecc compatibility provider)
+def SegLsp(): string
   var lsp = get(g:, 'simplecc_status', '')
-  if ConfBool('simpleline_show_lsp', true) && type(lsp) == v:t_string && lsp !=# ''
-    s ..= '%#SimpleLineLSP# ' .. RenderEscape(lsp) .. ' '
+  if !ConfBool('simpleline_show_lsp', true) || type(lsp) != v:t_string || lsp ==# ''
+    return ''
   endif
+  return '%#SimpleLineLSP# ' .. RenderEscape(lsp) .. ' '
+enddef
 
-  # User-provided segments
-  for segment in CustomSegments('simpleline_custom_right', 'SimpleLineRight')
-    s ..= '%#' .. segment.hl .. '# ' .. segment.text .. ' '
-  endfor
-
-  # Right metadata progressively disappears in compact windows.
+# Right metadata progressively disappears in compact windows.
+def SegMetadata(): string
+  var compact = IsCompact()
   var metadata: list<string> = []
   if !compact && ConfBool('simpleline_show_filetype', true)
     metadata->add('%{&filetype ==# "" ? "-" : &filetype}')
@@ -895,18 +937,181 @@ export def ActiveStatusline(): string
   if !compact && ConfBool('simpleline_show_fileformat', true)
     metadata->add('%{&fileformat}')
   endif
-  if !empty(metadata)
-    s ..= '%#SimpleLineRightSep#' .. s_sep_r
-    s ..= '%#SimpleLineRight# ' .. join(metadata, ' ' .. s_subsep_r .. ' ') .. ' '
+  if empty(metadata)
+    return ''
   endif
+  return '%#SimpleLineRightSep#' .. s_sep_r
+        \ .. '%#SimpleLineRight# ' .. join(metadata, ' ' .. s_subsep_r .. ' ') .. ' '
+enddef
 
-  # Position
-  if ConfBool('simpleline_show_position', true)
-    s ..= '%#SimpleLinePosSep#' .. s_sep_r
-    s ..= '%#SimpleLinePos# %l:%c %p%% '
+def SegPosition(): string
+  if !ConfBool('simpleline_show_position', true)
+    return ''
   endif
+  return '%#SimpleLinePosSep#' .. s_sep_r .. '%#SimpleLinePos# %l:%c %p%% '
+enddef
 
-  return s
+# The built-in table, built on first use.  Vim9 type-checks a script-level
+# assignment while the script is being sourced, and checking a
+# `dict<func(): string>` literal compiles every function in it — SegFilename()
+# reaches StatusFilename(), which reaches TreeRoot() several hundred lines
+# further down, so a literal here fails to source with E117.  Deferring the
+# table to the first redraw compiles it against the finished script instead.
+var s_segments: dict<func(): string> = {}
+
+def Segments(): dict<func(): string>
+  if empty(s_segments)
+    s_segments = {
+      mode: SegMode,
+      recording: SegRecording,
+      git: SegGit,
+      hunks: SegHunks,
+      diagnostics: SegDiagnostics,
+      custom_left: SegCustomLeft,
+      filename: SegFilename,
+      search: SegSearch,
+      lsp: SegLsp,
+      custom_right: SegCustomRight,
+      metadata: SegMetadata,
+      position: SegPosition,
+    }
+  endif
+  return s_segments
+enddef
+
+# Segments contributed by the user or a sibling plugin, in the same
+# {fn, hl, compact} shape as g:simpleline_custom_left.  Kept in a separate
+# dictionary from the built-ins so that a registration can never shadow one and
+# inherit the raw, unescaped rendering that goes with it.
+var s_user_segments: dict<dict<any>> = {}
+# Names in a layout that resolved to nothing, so :SimpleLineHealth can answer
+# "why is that segment missing" — a typo would otherwise render as silence.
+var s_unknown_segments: dict<bool> = {}
+
+# The default layout, and the one thing this whole mechanism must not change:
+# walking it produces the statusline byte for byte as the hardcoded builder did.
+# tests/vim/sections.vim pins that against a golden string.
+const DEFAULT_SECTIONS: dict<list<any>> = {
+  left: ['mode', 'recording', 'git', 'hunks', 'diagnostics', 'custom_left', 'filename'],
+  right: ['search', 'lsp', 'custom_right', 'metadata', 'position'],
+}
+
+export def RegisterSegment(name: string, spec: dict<any>)
+  if name !~# '^\w\+$'
+    DebugLog('segment name must be a word, got ' .. VisibleText(name))
+    return
+  endif
+  if has_key(Segments(), name)
+    DebugLog('refusing to redefine the built-in segment ' .. name)
+    return
+  endif
+  if !has_key(spec, 'fn')
+    DebugLog('segment ' .. name .. ' needs an fn')
+    return
+  endif
+  # A copy: a caller that later mutates the dict it passed in would otherwise be
+  # changing what every redraw evaluates.
+  s_user_segments[name] = copy(spec)
+enddef
+
+export def SegmentNames(): list<string>
+  return sort(keys(Segments()) + keys(s_user_segments))
+enddef
+
+# One label per entry, for the health report: an inline dict has no name of its
+# own, and printing the dict would put a user function name in a diagnostic that
+# is routinely pasted into a bug report.
+def SectionNames(entries: list<any>): list<string>
+  return mapnew(entries, (_, v) => type(v) == v:t_string ? v : '<inline>')
+enddef
+
+# Keep only the sides that are actually lists.  Anything else — a typo, a string,
+# a half-written dict — is dropped here rather than in the redraw, where the
+# error would repeat on every screen update.
+def ValidSections(value: any): dict<list<any>>
+  if type(value) != v:t_dict
+    return {}
+  endif
+  var out: dict<list<any>> = {}
+  for side in ['left', 'right']
+    var entries = get(value, side, null)
+    if type(entries) == v:t_list
+      out[side] = entries
+    endif
+  endfor
+  return out
+enddef
+
+# A per-filetype layout wins over the global one, which wins over the default.
+# Each is merged over the one below it side by side, so overriding only `right`
+# leaves the left side at its default instead of blanking it; `left: []` is an
+# explicit empty layout and does blank it.
+def ResolveSections(): dict<list<any>>
+  var sections = copy(DEFAULT_SECTIONS)
+  sections->extend(ValidSections(get(g:, 'simpleline_sections', {})))
+  var by_kind = get(g:, 'simpleline_sections_filetype', {})
+  if type(by_kind) != v:t_dict || empty(by_kind)
+    return sections
+  endif
+  # 'buftype' is the fallback key so that every scratch, quickfix or terminal
+  # buffer can share one layout without naming each filetype that lands in one.
+  var target = StatusTarget()
+  for key in [getbufvar(target.bufnr, '&filetype'), getbufvar(target.bufnr, '&buftype')]
+    if type(key) == v:t_string && key !=# '' && has_key(by_kind, key)
+      sections->extend(ValidSections(by_kind[key]))
+      break
+    endif
+  endfor
+  return sections
+enddef
+
+def RenderSection(entries: list<any>, default_hl: string): string
+  var out = ''
+  var compact = IsCompact()
+  for entry in entries
+    if type(entry) == v:t_dict
+      # An inline segment: the same shape g:simpleline_custom_left takes, so a
+      # one-off needs no registration.  It carries its own leading pad and no
+      # trailing one — every segment in a layout opens with a group and a
+      # space, so a trailing pad would double up between neighbours.
+      var inline = CustomSegment(entry, default_hl, compact)
+      if !empty(inline)
+        out ..= '%#' .. inline.hl .. '# ' .. inline.text
+      endif
+      continue
+    endif
+    if type(entry) != v:t_string
+      DebugLog('section entry must be a segment name or a dict')
+      continue
+    endif
+    if has_key(Segments(), entry)
+      var Builtin: func(): string = Segments()[entry]
+      out ..= Builtin()
+      continue
+    endif
+    if has_key(s_user_segments, entry)
+      var registered = CustomSegment(s_user_segments[entry], default_hl, compact)
+      if !empty(registered)
+        out ..= '%#' .. registered.hl .. '# ' .. registered.text
+      endif
+      continue
+    endif
+    if !has_key(s_unknown_segments, entry)
+      s_unknown_segments[entry] = true
+      DebugLog('unknown statusline segment ' .. VisibleText(entry)
+            \ .. '; known: ' .. join(SegmentNames(), ', '))
+    endif
+  endfor
+  return out
+enddef
+
+export def ActiveStatusline(): string
+  var sections = ResolveSections()
+  # '%=' is the only thing the walk itself contributes: everything before it is
+  # packed to the left, everything after it pushed to the right end.
+  return RenderSection(sections.left, 'SimpleLineMid')
+        \ .. '%='
+        \ .. RenderSection(sections.right, 'SimpleLineRight')
 enddef
 
 export def InactiveStatusline(): string
@@ -2777,6 +2982,15 @@ export def Health()
         \ .. registered_custom .. ' registered (left/right '
         \ .. (type(custom_left) == v:t_list ? len(custom_left) : 0) .. '/'
         \ .. (type(custom_right) == v:t_list ? len(custom_right) : 0) .. ')'
+  var sections = ResolveSections()
+  echo '  sections left: ' .. join(SectionNames(sections.left), ' ')
+  echo '  sections right: ' .. join(SectionNames(sections.right), ' ')
+  echo '  segments available: ' .. join(SegmentNames(), ' ')
+  if !empty(s_unknown_segments)
+    # On its own line: this is the answer to "I listed it and nothing appeared",
+    # and it must not be lost at the end of a line the terminal wrapped away.
+    echo '  segments unknown: ' .. join(sort(keys(s_unknown_segments)), ' ')
+  endif
   echo '  git cache/pending: ' .. len(s_git_cache) .. '/' .. len(s_git_pending)
   var current = get(s_git_cache, CurrentGitDir(), {})
   var files = get(current, 'files', {})

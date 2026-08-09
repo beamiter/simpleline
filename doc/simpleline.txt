@@ -132,6 +132,8 @@ keep Vim's native labels.                    *g:simpleline_filename_mode*
 g:simpleline_filetype_icons           {}
 g:simpleline_custom_left              [] (user segments, see below)
 g:simpleline_custom_right             [] (user segments, see below)
+g:simpleline_sections                 {} (segment layout, see below)
+g:simpleline_sections_filetype        {} (per-kind layouts, see below)
 g:simpleline_debug                    0
 g:simpleline_enable_default_mappings  1
 
@@ -352,6 +354,72 @@ reported through g:simpleline_debug; it never breaks the statusline.
 Providers run on every statusline redraw, so they must be cheap — read a
 cached variable instead of shelling out.  :SimpleLineHealth reports the total
 registered/rendered count and the left/right registration split.
+
+                                                       *simpleline-sections*
+                                                       *g:simpleline_sections*
+The statusline is a walk over a section layout, so the order of the segments —
+and which of them appear at all — is configuration rather than code: >
+
+  let g:simpleline_sections = {
+        \ 'left':  ['mode', 'git', 'filename'],
+        \ 'right': ['metadata', 'position'],
+        \ }
+<
+"left" is packed against the left edge and "right" against the right; the %=
+between them is the only thing the walk itself contributes. A side that is not
+mentioned keeps its default, so overriding only "right" does not blank the
+left. An explicit empty list is a layout rather than a missing one and clears
+that side. A value that is not a dictionary, and a side that is not a list,
+are ignored in favour of the default instead of breaking a redraw.
+
+The built-in segment names, in default order:
+
+  left     mode, recording, git, hunks, diagnostics, custom_left, filename
+  right    search, lsp, custom_right, metadata, position
+
+custom_left and custom_right render g:simpleline_custom_left and
+g:simpleline_custom_right in place, so the two mechanisms compose. Every
+segment carries its own highlight group and separator glyph, which is why the
+default layout renders exactly the line Simpleline drew before layouts existed.
+Each segment still honours its own option: dropping g:simpleline_show_position
+hides "position" wherever it is listed.
+
+A name that matches no segment is skipped, the rest of the layout still
+renders, and :SimpleLineHealth lists it under "segments unknown" — a typo is
+otherwise indistinguishable from a segment that had nothing to say.
+
+An entry can also be a segment dictionary in the |simpleline-custom-segments|
+format, which needs no registration: >
+
+  let g:simpleline_sections = {'left': [
+        \ 'mode', {'fn': 'MyTicket', 'hl': 'SimpleLineGit'}, 'filename']}
+<
+                                                *simpleline#RegisterSegment()*
+simpleline#RegisterSegment({name}, {spec}) gives such a dictionary a name a
+layout can refer to. {name} must match \w\+ and {spec} is the same
+{fn, hl, compact} dictionary, which must have an "fn". A registration cannot
+take the name of a built-in segment: built-ins emit Vim format items on
+purpose while a registered segment's text is always escaped, so shadowing one
+would turn a layout into a way to inject format items. Rejected registrations
+are reported through g:simpleline_debug.
+
+                                                   *simpleline#SegmentNames()*
+simpleline#SegmentNames() returns every name a layout can use, built-in and
+registered, sorted. :SimpleLineHealth prints the same list next to the layout
+it resolved for the current buffer.
+
+                                              *g:simpleline_sections_filetype*
+Per-buffer layouts are keyed by 'filetype' first and 'buftype' second, so one
+entry can cover every scratch buffer without naming each filetype: >
+
+  let g:simpleline_sections_filetype = {
+        \ 'qf':     {'left': ['mode'], 'right': ['position']},
+        \ 'nofile': {'left': [], 'right': ['position']},
+        \ }
+<
+The first of the two keys that matches wins, and it is merged over
+g:simpleline_sections side by side, exactly as that one is merged over the
+default layout.
 
 SimpleLine* highlight groups use `:highlight default`. Define them before
 Simpleline to override the built-in palette. Tabline transitions derive from

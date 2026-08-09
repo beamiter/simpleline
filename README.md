@@ -107,6 +107,8 @@ Set options before Simpleline loads. After changing a visual/runtime option, run
 | `g:simpleline_filetype_icons` | `{}` | Dictionary merged over built-in icons. |
 | `g:simpleline_custom_left` | `[]` | User segments before the filename, see below. |
 | `g:simpleline_custom_right` | `[]` | User segments on the right, see below. |
+| `g:simpleline_sections` | `{}` | Segment layout, `{'left': [...], 'right': [...]}`; empty means the built-in order. See below. |
+| `g:simpleline_sections_filetype` | `{}` | Per-kind layouts keyed by `'filetype'` then `'buftype'`. See below. |
 | `g:simpleline_debug` | `0` | Emit daemon/client errors through `:messages`. |
 | `g:simpleline_enable_default_mappings` | `1` | Add historical mappings only when their keys are unused. |
 
@@ -201,6 +203,27 @@ The legacy `:BufferJump1` … `:BufferJump0` commands remain available.
   ```
 
   `fn` is a function name or Funcref taking no argument and returning a string; an empty return hides the segment, and an unknown function name is skipped silently so a segment can be registered before its provider loads. `hl` defaults to `SimpleLineMid` on the left and `SimpleLineRight` on the right; `compact` (default `1`) controls whether the segment survives in compact windows. The text is escaped like every other dynamic segment, and a provider that throws is skipped instead of breaking the statusline. Providers run on every redraw, so they should read a cached variable rather than shell out.
+- The statusline is a walk over a section layout, so segment order — and which segments appear at all — is configuration rather than code:
+
+  ```vim
+  let g:simpleline_sections = {
+        \ 'left':  ['mode', 'git', 'filename'],
+        \ 'right': ['metadata', 'position'],
+        \ }
+  ```
+
+  `left` is packed against the left edge and `right` against the right; the `%=` between them is the only thing the walk itself contributes. The built-in names, in default order, are `mode`, `recording`, `git`, `hunks`, `diagnostics`, `custom_left`, `filename` on the left and `search`, `lsp`, `custom_right`, `metadata`, `position` on the right — `custom_left`/`custom_right` render the two lists above in place, so both mechanisms compose. A side that is not mentioned keeps its default, an explicit empty list clears that side, and a malformed value falls back to the default rather than breaking a redraw. An unknown name is skipped and `:SimpleLineHealth` lists it under `segments unknown`.
+
+  An entry may also be a `{'fn': ..., 'hl': ...}` dictionary inline, needing no registration. `simpleline#RegisterSegment('ticket', {'fn': 'MyTicket', 'hl': 'SimpleLineGit'})` gives one a name a layout can use; `simpleline#SegmentNames()` lists everything available. A registration cannot take a built-in name: built-ins emit Vim format items on purpose, while a registered segment's text is always escaped.
+
+  `g:simpleline_sections_filetype` overrides the layout per buffer, keyed by `'filetype'` first and `'buftype'` second so one entry covers every scratch buffer:
+
+  ```vim
+  let g:simpleline_sections_filetype = {
+        \ 'qf':     {'left': ['mode'], 'right': ['position']},
+        \ 'nofile': {'left': [], 'right': ['position']},
+        \ }
+  ```
 - All `SimpleLine*` status groups use `:highlight default`, so a colorscheme or vimrc can define them first. Tabline colors derive from `TabLine`, `TabLineSel`, and `TabLineFill`; the pick hint has its own default red group.
 
 ## Troubleshooting

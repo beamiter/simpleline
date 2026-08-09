@@ -2,6 +2,42 @@
 
 ## Unreleased - 2026-08-08
 
+### 新增:`g:simpleline_sections` —— 用声明式布局取代写死的段落顺序
+
+`ActiveStatusline()` 之前是一串写死的拼接:mode、recording、git、hunks……想把
+位置块放到左边,或者干脆不要 mode 块,除了改源码没有别的办法。现在它是一次对
+`g:simpleline_sections` 的遍历:
+
+    let g:simpleline_sections = {
+          \ 'left':  ['mode', 'git', 'filename'],
+          \ 'right': ['metadata', 'position'],
+          \ }
+
+这套机制最要紧的一条是它什么都没改:默认布局逐字节渲染出和原来那个构造器一模
+一样的行,分隔符也一样。`tests/vim/sections.vim` 拿一个 golden 字符串把这件事
+钉死,plain 和 powerline 各一份——每个段落连同紧跟它的那块分隔符一起返回(楔形
+是用一段的颜色画在下一段的底色上的,只返回文本的段落会让遍历不知道是哪两个高亮
+组在交接),所以走漏一段会当场露馅。
+
+- 内置段落是一个封闭集合:`mode` `recording` `git` `hunks` `diagnostics`
+  `custom_left` `filename` `search` `lsp` `custom_right` `metadata` `position`。
+  它们是 raw 的——`%f`、`%l:%c`、`%{...}` 本来就该原样交给状态栏解析器;用户段落
+  一律经过 `RenderEscape()`。`simpleline#RegisterSegment()` 因此拒绝占用内置
+  名字:让注册盖掉 `filename`,等于把用户的返回值升格成 raw,一个布局选项就成了
+  注入格式项的入口。
+- 没提到的那一边保留默认,写成空列表才是"这一边什么都不要";不是字典的值、不是
+  列表的一边,都退回默认,而不是在重画里抛异常。
+- 认不出的名字跳过,其余照常渲染,`:SimpleLineHealth` 用 `segments unknown:`
+  一行点名——否则一个拼错的段落名和"这个段落这次没话说"是分不出来的。它上面还
+  打印本缓冲区解析出来的布局,以及 `simpleline#SegmentNames()` 的全集。
+- `g:simpleline_sections_filetype` 先按 'filetype' 取、再按 'buftype' 取,所以
+  一条 `nofile` 就能覆盖所有临时缓冲区,不必逐个 filetype 点名。
+- 布局条目也可以直接写成 `{'fn': ..., 'hl': ...}`,和 `g:simpleline_custom_left`
+  是同一种形状,不必注册;那段求值逻辑抽成了 `CustomSegment()`,两条路径共用。
+  两个旧列表选项自己的渲染一字未动。
+- 测试:新增 `tests/vim/sections.vim`,已接入 `make check`。改动前它有十处断言
+  是红的;两条 golden 断言按设计在改动前就是绿的——它们钉的恰恰是"没变"。
+
 ### 修复:watch 之后再改 tabline 选项,want_files 不会跟着变
 
 `want_files` 是随 `watch` 请求一起发过去的——主动推送不回答任何请求,所以没有
