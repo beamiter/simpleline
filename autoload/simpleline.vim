@@ -222,8 +222,99 @@ def BufFtIcon(bn: number): string
   return ''
 enddef
 
+# ----------- SimpleRemote workspaces -----------
+# simpleremote's virtual mode opens a remote file as a buffer named
+# remote:///abs/path with 'buftype' acwrite and b:vimrc_remote =
+# {path, uri, generation}; the projected modes (sshfs, docker-bind, local-map)
+# open ordinary local files under g:simpleremote_workspace.local_root.  The
+# snapshot g:simpleremote_workspace {kind, target, root, tree_root, local_root,
+# mode, ...} exists only while a connection is ready and g:simpleremote_status
+# is 'disconnected', 'connecting kind:target' or 'kind:target'.  Everything
+# below is feature-detected: without simpleremote every helper answers "not
+# remote" and the plugin behaves exactly as before.
+def RemoteWorkspace(): dict<any>
+  var ws = get(g:, 'simpleremote_workspace', {})
+  return type(ws) == v:t_dict ? ws : {}
+enddef
+
+# The remote directory display names are shortened against: the tree's view
+# root when the remote tree is detached from the workspace, the workspace root
+# otherwise — the same choice SimpleTree's root makes for local files.
+def RemoteRoot(): string
+  var ws = RemoteWorkspace()
+  var root = get(ws, 'tree_root', '')
+  if type(root) != v:t_string || root ==# ''
+    root = get(ws, 'root', '')
+  endif
+  return type(root) == v:t_string ? root : ''
+enddef
+
+# The absolute remote path behind a virtual buffer, '' for anything else.
+# b:vimrc_remote is the contract; the name is the fallback for a buffer whose
+# asynchronous fill has not completed yet (BufReadCmd sets the variable after
+# the read returns) and for one re-edited from a session before reconnecting.
+def RemoteBufferPath(bn: number): string
+  var info: any = getbufvar(bn, 'vimrc_remote', {})
+  if type(info) == v:t_dict && !empty(info)
+    var path = get(info, 'path', '')
+    if type(path) == v:t_string && path !=# ''
+      return path
+    endif
+  endif
+  var name = bufname(bn)
+  return name =~# '^remote://' ? strpart(name, 9) : ''
+enddef
+
+# A filled virtual buffer: acwrite *and* b:vimrc_remote.  Deliberately narrower
+# than RemoteBufferPath(): this is what lets a buffer with a 'buftype' into the
+# tabline, and no other acwrite buffer must ride along.
+def IsRemoteVirtualBuffer(bn: number): bool
+  var bt = getbufvar(bn, '&buftype')
+  if type(bt) != v:t_string || bt !=# 'acwrite'
+    return false
+  endif
+  var info: any = getbufvar(bn, 'vimrc_remote', {})
+  return type(info) == v:t_dict && !empty(info)
+enddef
+
+# Whether a local directory lives on an sshfs projection of the workspace.  A
+# FUSE mount never delivers inotify events for remote-side edits, so a watch
+# there would silence the poll for good; and every `git status` over it is a
+# network round trip per file, so the poll runs at a fraction of its usual
+# rate (see GitTimerCb()).  Only ever consulted from the request path, never
+# from a redraw.
+def IsSshfsProjection(dir: string): bool
+  if dir ==# ''
+    return false
+  endif
+  var ws = RemoteWorkspace()
+  if get(ws, 'mode', '') !=# 'sshfs'
+    return false
+  endif
+  var local_root = get(ws, 'local_root', '')
+  if type(local_root) != v:t_string || local_root ==# ''
+    return false
+  endif
+  if RelToRoot(dir, local_root) !=# ''
+    return true
+  endif
+  # The mountpoint is published resolved; a buffer opened through a symlink to
+  # it is still on the mount.
+  return RelToRoot(resolve(dir), local_root) !=# ''
+enddef
+
 # ----------- Git info -----------
+# '' for a simpleremote virtual buffer: its name is a remote:// URI, not a
+# directory anything local can run `git status` in.  Every caller treats '' as
+# "nothing to ask and nothing cached" — RequestGitDir() returns before it
+# spawns the daemon, GitStr() renders nothing — so the branch for such a
+# buffer comes from simplegit's b:simplegit_status_dict (SimpleGitStatus())
+# alone, and no `git -C remote:///...` is ever spawned on every poll.
 def CurrentGitDir(): string
+  var bn = bufnr('%')
+  if RemoteBufferPath(bn) !=# ''
+    return ''
+  endif
   var dir = expand('%:p:h')
   if dir ==# ''
     dir = getcwd()
@@ -527,6 +618,14 @@ def StatusFilename(): string
   if index(['native', 'tail', 'rel', 'abbr', 'abs'], mode) < 0
     mode = 'native'
   endif
+  # A simpleremote virtual buffer is named by its remote:// URI, which is what
+  # %f would print in full; every mode, 'native' included, renders it relative
+  # to the remote workspace root instead.  The check is two cheap lookups, so
+  # the native path still costs nothing for a local buffer.
+  var remote_path = RemoteBufferPath(TargetBufnr())
+  if remote_path !=# ''
+    return RemoteStatusFilename(remote_path, mode)
+  endif
   if mode ==# 'native'
     return '%f'
   endif
@@ -560,6 +659,33 @@ def StatusFilename(): string
     return RenderEscape(fnamemodify(name, ':t'))
   endif
   return RenderEscape(mode ==# 'rel' ? relative : AbbrevRelPath(relative))
+enddef
+
+# The buffer whose statusline is being drawn, without StatusTarget()'s cwd
+# lookup: enough to decide whether the buffer is remote.
+def TargetBufnr(): number
+  var configured = get(g:, 'statusline_winid', 0)
+  var bn = type(configured) == v:t_number ? winbufnr(configured) : -1
+  return bn > 0 ? bn : bufnr('%')
+enddef
+
+# The remote path is literal text — never a %f — and is shortened against the
+# remote workspace root, or shown whole when it lies outside it or no workspace
+# is connected (a session's remote buffers before the reconnect); the bare
+# tail would hide which of two same-named files this is.
+def RemoteStatusFilename(remote_path: string, mode: string): string
+  if mode ==# 'tail'
+    return RenderEscape(fnamemodify(remote_path, ':t'))
+  endif
+  if mode ==# 'abs'
+    return RenderEscape(remote_path)
+  endif
+  var root = RemoteRoot()
+  var relative = root ==# '' ? '' : RelToRoot(remote_path, root)
+  if relative ==# ''
+    return RenderEscape(remote_path)
+  endif
+  return RenderEscape(mode ==# 'abbr' ? AbbrevRelPath(relative) : relative)
 enddef
 
 # ----------- Extra statusline segments -----------
@@ -806,6 +932,9 @@ def SetupHighlights()
   # LSP (simplecc)
   highlight default SimpleLineLSP       guibg=#3e4452 guifg=#56b6c2 ctermfg=73 ctermbg=238
 
+  # Remote workspace (simpleremote)
+  highlight default SimpleLineRemote    guibg=#3e4452 guifg=#c678dd ctermfg=176 ctermbg=238
+
   # Macro recording indicator
   highlight default SimpleLineRec       guibg=#e06c75 guifg=#282c34 gui=bold ctermfg=235 ctermbg=168 cterm=bold
 
@@ -924,6 +1053,49 @@ def SegLsp(): string
   return '%#SimpleLineLSP# ' .. RenderEscape(lsp) .. ' '
 enddef
 
+# The simpleremote workspace: 'ssh:host:project@12ms' from
+# g:SimpleRemoteStatusline() while a connection is up, 'connecting ...' while
+# the handshake runs, nothing at all when simpleremote is absent or
+# disconnected — which is what keeps the default layout byte-identical for
+# everyone else.  It reads two globals and one printf-cheap accessor; nothing
+# here may talk to a daemon, this runs on every redraw.
+def RemoteStr(): string
+  if !ConfBool('simpleline_show_remote', true)
+    return ''
+  endif
+  var status = get(g:, 'simpleremote_status', '')
+  if type(status) != v:t_string || status ==# '' || status ==# 'disconnected'
+    return ''
+  endif
+  var text = ''
+  if exists('*g:SimpleRemoteStatusline')
+    try
+      var value = g:SimpleRemoteStatusline()
+      text = type(value) == v:t_string ? value : ''
+    catch
+      DebugLog('g:SimpleRemoteStatusline() threw: ' .. v:exception)
+    endtry
+  endif
+  if text ==# ''
+    text = status
+  endif
+  # The accessor names the workspace as soon as a connection is attempted, so
+  # "connecting" is the status' word, not its.
+  if status =~# '^connecting' && text !~# '^connecting'
+    text = 'connecting ' .. text
+  endif
+  if IsCompact()
+    # The latency suffix goes the way of ahead/behind in a narrow window.
+    text = substitute(text, '@\d\+ms$', '', '')
+  endif
+  return text
+enddef
+
+def SegRemote(): string
+  var remote = RemoteStr()
+  return remote ==# '' ? '' : '%#SimpleLineRemote# ' .. RenderEscape(remote) .. ' '
+enddef
+
 # Right metadata progressively disappears in compact windows.
 def SegMetadata(): string
   var compact = IsCompact()
@@ -963,6 +1135,7 @@ def Segments(): dict<func(): string>
   if empty(s_segments)
     s_segments = {
       mode: SegMode,
+      remote: SegRemote,
       recording: SegRecording,
       git: SegGit,
       hunks: SegHunks,
@@ -992,7 +1165,7 @@ var s_unknown_segments: dict<bool> = {}
 # walking it produces the statusline byte for byte as the hardcoded builder did.
 # tests/vim/sections.vim pins that against a golden string.
 const DEFAULT_SECTIONS: dict<list<any>> = {
-  left: ['mode', 'recording', 'git', 'hunks', 'diagnostics', 'custom_left', 'filename'],
+  left: ['mode', 'remote', 'recording', 'git', 'hunks', 'diagnostics', 'custom_left', 'filename'],
   right: ['search', 'lsp', 'custom_right', 'metadata', 'position'],
 }
 
@@ -1133,6 +1306,9 @@ var s_char_to_bufnr: dict<number> = {}
 var s_idx_to_buf: dict<number> = {}
 var s_buf_to_idx: dict<number> = {}
 var s_tab_render_root: string = ''
+# The remote workspace root simpleremote virtual buffers are shortened
+# against; kept beside the local root so both feed the same invalidation.
+var s_tab_remote_root: string = ''
 var s_tab_name_mode: string = ''
 var s_tab_name_cache: dict<string> = {}
 
@@ -1200,8 +1376,13 @@ def RefreshTabRenderRoot()
   # too: the cache is keyed on buffer and file name only, so without this a
   # mode change kept returning labels shortened under the previous mode.
   var mode = TabConfString('simpletabline_path_mode', 'abbr')
+  # The remote root is an input of the same cache: a workspace switch or a
+  # remote tree re-root moves it without touching the local root or the mode.
+  var remote_root = RemoteRoot()
   if root !=# s_tab_render_root || mode !=# s_tab_name_mode
+        \ || remote_root !=# s_tab_remote_root
     s_tab_render_root = root
+    s_tab_remote_root = remote_root
     s_tab_name_mode = mode
     s_tab_name_cache = {}
   endif
@@ -1437,12 +1618,16 @@ def TabSepPart(left: string, right: string): list<string>
     \ ? 'SimpleTabActToInact' : 'SimpleTabInactToAct', s_sep_l]
 enddef
 
+# A normal buffer, or a simpleremote virtual one: remote:// buffers carry
+# 'buftype' acwrite because their reads and writes go through a channel, but
+# they are files being edited, and in virtual mode they are the only files —
+# a tabline that dropped them would be empty for the whole session.
 def IsEligibleBuffer(bn: number): bool
   if bn <= 0 || bufexists(bn) == 0
     return false
   endif
   var bt = getbufvar(bn, '&buftype')
-  if type(bt) != v:t_string || bt !=# ''
+  if type(bt) != v:t_string || (bt !=# '' && !IsRemoteVirtualBuffer(bn))
     return false
   endif
   var use_listed = TabConfBool('simpletabline_listed_only', true)
@@ -1457,7 +1642,7 @@ def ListedNormalBuffers(): list<dict<any>>
   var res: list<dict<any>> = []
   for b in bis
     var bt = getbufvar(b.bufnr, '&buftype')
-    if type(bt) == v:t_string && bt ==# ''
+    if type(bt) == v:t_string && (bt ==# '' || IsRemoteVirtualBuffer(b.bufnr))
       res->add(b)
     endif
   endfor
@@ -1476,17 +1661,21 @@ def RawBufDisplayName(b: dict<any>): string
     return '[No Name]'
   endif
   var bmode = TabConfString('simpletabline_path_mode', 'abbr')
+  # A remote:// buffer is named by its remote path against the remote root:
+  # fnamemodify(':p') leaves the URI as it is, and the local root would never
+  # match it, so without this every remote buffer fell to its bare tail.
+  var remote = RemoteBufferPath(b.bufnr)
   if bmode ==# 'tail'
-    return fnamemodify(n, ':t')
+    return fnamemodify(remote !=# '' ? remote : n, ':t')
   endif
-  var abs = fnamemodify(n, ':p')
+  var abs = remote !=# '' ? remote : fnamemodify(n, ':p')
   if bmode ==# 'abs'
     return abs
   endif
-  var root = s_tab_render_root
+  var root = remote !=# '' ? s_tab_remote_root : s_tab_render_root
   var rel = (root !=# '') ? RelToRoot(abs, root) : ''
   if rel ==# ''
-    return fnamemodify(n, ':t')
+    return fnamemodify(abs, ':t')
   endif
   if bmode ==# 'rel'
     return rel
@@ -1873,6 +2062,7 @@ def TablineMemoKey(all: list<dict<any>>, marks: dict<string>): string
     string(&columns),
     string(bufnr('%')),
     s_tab_render_root,
+    s_tab_remote_root,
     TabConfString('simpletabline_item_sep', ' | '),
     TabConfString('simpletabline_ellipsis', ' … '),
     TabConfString('simpletabline_key_sep', ''),
@@ -1899,7 +2089,23 @@ enddef
 export def InvalidateTabline()
   s_tabline_key = ''
   s_tab_render_root = ''
+  s_tab_remote_root = ''
   s_tab_name_cache = {}
+enddef
+
+# simpleremote's connection and workspace events.  The remote segment reads
+# g:simpleremote_status on every redraw, but Emit() never redraws, so without
+# this a Connected/Disconnected transition would only show on the next cursor
+# move; and the tabline labels of remote buffers are shortened against a root
+# that has just moved.  Fired from a job callback, where a redraw can be
+# refused — the invalidation is the part that must not be lost.
+export def RefreshRemote()
+  InvalidateTabline()
+  try
+    redrawstatus
+    redrawtabline
+  catch
+  endtry
 enddef
 
 export def Tabline(): string
@@ -2550,7 +2756,9 @@ def DaemonGitNeeded(): bool
 enddef
 
 def RequestGitDir(dir: string)
-  if !s_enabled || !ConfBool('simpleline_git_enabled', true)
+  # '' is CurrentGitDir()'s answer for a remote virtual buffer: nothing local to
+  # ask about, so not even the daemon is spawned on its account.
+  if dir ==# '' || !s_enabled || !ConfBool('simpleline_git_enabled', true)
     return
   endif
   if !DaemonGitNeeded()
@@ -2583,6 +2791,7 @@ def RequestGitDir(dir: string)
     TakePending(id)
     return
   endif
+  NoteSshfsPoll(dir)
   # Ask to be told about this directory only after asking what it looks like
   # now: the answer to the question already in flight is the newer of the two,
   # and a watch granted first would have its opening push overwritten by it.
@@ -2626,7 +2835,7 @@ def WantWatch(): bool
 enddef
 
 def MaybeWatch(dir: string)
-  if !WantWatch()
+  if !WantWatch() || IsSshfsProjection(dir)
     return
   endif
   if has_key(s_git_watch_pending, dir) || has_key(s_git_watch_refused, dir)
@@ -2672,8 +2881,39 @@ def RequestGitInfo()
   RequestGitDir(CurrentGitDir())
 enddef
 
+# The poll over an sshfs projection runs at most once per SSHFS_POLL_MS (or
+# g:simpleline_git_interval when that is longer): a `git status` there is a
+# round trip per file, and the mount is never watched (MaybeWatch()), so
+# without a floor the ordinary 2 s poll would run over the network for the
+# whole session.  Buffer entry, write and focus still refresh at once — only
+# the timer is slowed, and it counts from the last request of any origin.
+const SSHFS_POLL_MS = 10000
+var s_git_sshfs_polled: dict<list<number>> = {}
+
+def NoteSshfsPoll(dir: string)
+  if !IsSshfsProjection(dir)
+    return
+  endif
+  if !has_key(s_git_sshfs_polled, dir) && len(s_git_sshfs_polled) >= 128
+    s_git_sshfs_polled = {}
+  endif
+  s_git_sshfs_polled[dir] = reltime()
+enddef
+
+def SshfsPollDue(dir: string): bool
+  var last = get(s_git_sshfs_polled, dir, [])
+  if empty(last)
+    return true
+  endif
+  var floor = max([ConfNumber('simpleline_git_interval', 2000), SSHFS_POLL_MS])
+  return reltimefloat(reltime(last)) * 1000 >= floor
+enddef
+
 def GitTimerCb(_id: number)
   var dir = CurrentGitDir()
+  if dir ==# ''
+    return
+  endif
   # The point of the whole feature: a directory the daemon reports on is not
   # asked about.  Polling it anyway would spawn `git status` over the worktree
   # every interval to learn what the daemon has already undertaken to say.
@@ -2683,6 +2923,9 @@ def GitTimerCb(_id: number)
     # it, want_files would only ever be renegotiated by an autocommand that
     # happened to fire afterwards, or not at all.
     MaybeWatch(dir)
+    return
+  endif
+  if IsSshfsProjection(dir) && !SshfsPollDue(dir)
     return
   endif
   RequestGitDir(dir)
@@ -2760,6 +3003,9 @@ export def Enable()
   # under the previous ones must not survive a :SimpleLineReload.
   s_sep_groups = {}
   InvalidateTabline()
+  # The sshfs poll floor counts from the last request; a fresh enable starts
+  # from nothing rather than from a request made before the last :SimpleLineDisable.
+  s_git_sshfs_polled = {}
   try
     g:SimpleTablineApplyHL()
   catch
@@ -2812,6 +3058,13 @@ export def Enable()
     # simplegit fires this whenever the buffer's status dictionary changes; it
     # is what makes the handed-off branch appear without waiting for a poll.
     autocmd User SimpleGitUpdate redrawstatus
+    # simpleremote's connection lifecycle and workspace moves: the remote
+    # segment and the remote buffers' tabline labels follow them at once.
+    # Harmless when nothing fires them.
+    autocmd User SimpleRemoteConnecting,SimpleRemoteConnected,
+          \SimpleRemoteWorkspaceChanged,SimpleRemoteRuntimeReady,
+          \SimpleRemoteTreeRootChanged,SimpleRemoteDisconnected
+          \ simpleline#RefreshRemote()
     # Repaint the recording indicator immediately where Vim supports the events.
     if exists('##RecordingEnter')
       autocmd RecordingEnter,RecordingLeave * redrawstatus
@@ -2948,10 +3201,14 @@ export def Health()
         \ .. '/' .. (ConfBool('simpleline_tabline', true) ? 'on' : 'off') .. '/' .. &laststatus
   echo '  Git enabled/executable: ' .. (ConfBool('simpleline_git_enabled', true) ? 'yes' : 'no')
         \ .. '/' .. (executable('git') ? 'yes' : 'no')
+  var git_dir = CurrentGitDir()
   echo '  Git interval/timer: ' .. string(get(g:, 'simpleline_git_interval', 2000))
         \ .. '/' .. (s_git_timer == 0 ? 'stopped' : string(s_git_timer))
-        \ .. ' (this one ' .. (has_key(s_git_watched, CurrentGitDir())
-        \   ? 'watched' : 'polled') .. ')'
+        \ .. ' (this one ' .. (git_dir ==# '' ? 'remote, not queried'
+        \   : has_key(s_git_watched, git_dir) ? 'watched'
+        \   : IsSshfsProjection(git_dir) ? 'polled every '
+        \     .. max([ConfNumber('simpleline_git_interval', 2000), SSHFS_POLL_MS])
+        \     .. 'ms, sshfs' : 'polled') .. ')'
   echo '  git watch: ' .. (ConfBool('simpleline_git_watch', true) ? 'on' : 'off')
         \ .. '/' .. (WantWatch() ? 'negotiated' : 'unavailable')
         \ .. ', ' .. len(s_git_watched) .. ' dir(s) watched'
@@ -2972,6 +3229,19 @@ export def Health()
         \ .. '/' .. (s_daemon_incompatible ? 'no' : 'yes')
         \ .. '/' .. len(s_daemon_waiting_dirs)
   echo '  diagnostics provider: ' .. DiagProviderName()
+  # What the remote segment sees, so "why is it blank" has an answer: the
+  # status string it keys on, the workspace mode, and whether this buffer is
+  # one of simpleremote's.
+  var remote_status = get(g:, 'simpleremote_status', '')
+  var remote_mode = get(RemoteWorkspace(), 'mode', 'none')
+  echo '  remote workspace: ' .. (!exists('*g:SimpleRemoteStatusline')
+        \ ? 'simpleremote absent'
+        \ : (type(remote_status) == v:t_string && remote_status !=# ''
+        \     ? remote_status : 'disconnected')
+        \   .. ' (mode ' .. (type(remote_mode) == v:t_string ? remote_mode : 'none')
+        \   .. ', segment ' .. (ConfBool('simpleline_show_remote', true) ? 'on' : 'off')
+        \   .. ', this buffer ' .. (RemoteBufferPath(bufnr('%')) ==# '' ? 'local' : 'remote')
+        \   .. ')')
   var custom_left = get(g:, 'simpleline_custom_left', [])
   var custom_right = get(g:, 'simpleline_custom_right', [])
   var rendered_custom = len(CustomSegments('simpleline_custom_left', 'SimpleLineMid'))

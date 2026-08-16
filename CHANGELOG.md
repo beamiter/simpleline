@@ -1,5 +1,61 @@
 # Changelog
 
+## Unreleased - 2026-08-16
+
+### 新增:接住 simpleremote —— 工作区段位、remote:// 缓冲区的命名与 tabline、不再对远程缓冲区轮询 Git
+
+simpleremote 把 Vim 接到 SSH 主机或 Docker 容器上:虚拟模式下远程文件是名为
+`remote:///abs/path`、`'buftype'` 为 `acwrite`、带 `b:vimrc_remote` 的缓冲区,
+工作区快照在 `g:simpleremote_workspace`,连接状态在 `g:simpleremote_status`,
+而它自己从不重绘。之前 simpleline 对这一切一无所知:文件名段位对这种缓冲区
+永远走 `%f`,把整条 URI 原样打出来;tabline 把所有 `buftype != ''` 的缓冲区
+都排除在外,所以虚拟模式下 tabline 一整个会话都是空的;`CurrentGitDir()` 算出
+`remote:///...`,daemon 每 2 秒 `git -C remote:///... status` 一次,失败,段位
+空白。所有钩子都在重绘时做特性检测——没装 simpleremote 时每一处都渲染为空,
+`tests/vim/sections.vim` 钉住的默认布局 golden 一个字节都没变。
+
+- 新增内置段位 `remote`(`SegRemote()`),默认布局里紧跟 `mode` 之后:连接
+  就绪时显示 `g:SimpleRemoteStatusline()` 给的 `ssh:host:project@12ms`,握手
+  期间显示 `connecting ssh:host:project`,断开或 `g:simpleline_show_remote = 0`
+  时为空;compact 窗口去掉 `@NNms` 后缀,与 ahead/behind 的处理一致。取值只读
+  两个全局变量加一次 printf 级别的访问器,访问器抛异常则退回状态字符串;文本
+  照例经过 `RenderEscape()`。高亮组 `SimpleLineRemote`(默认紫色前景、中段
+  底色)。监听 `User SimpleRemoteConnecting/Connected/WorkspaceChanged/
+  RuntimeReady/TreeRootChanged/Disconnected` 调 `simpleline#RefreshRemote()`
+  (作废 tabline 备忘 + `redrawstatus`/`redrawtabline`,包在 try 里——它从 job
+  回调里触发,重绘可能被拒),状态切换即时可见,不必等下一次光标移动。
+- 文件名段位(`StatusFilename()`):`RemoteBufferPath()` 认出的缓冲区(有
+  `b:vimrc_remote`,或名字以 `remote://` 开头——填充完成前的缓冲区还没有那个
+  变量)在每一种 `g:simpleline_filename_mode` 下都按远程路径渲染:`native`/
+  `rel`/`abbr` 相对 `g:simpleremote_workspace.tree_root`(没有则 `root`),`tail`
+  取尾名,`abs` 取整条远程路径;不在根下、或工作区尚未连上(session 恢复前),
+  显示整条远程路径而不是尾名——尾名分不清两个同名文件。`%( %m%r%)` 保留,
+  inactive 行同样处理。`native` 路径上多出的只是两次 `getbufvar`/`bufname` 级
+  的查找,本地缓冲区仍然直接返回 `%f`。
+- tabline:`IsRemoteVirtualBuffer()`(严格要求 `acwrite` **且** `b:vimrc_remote`
+  非空,别的 `acwrite` 缓冲区一个都不放进来)在 `IsEligibleBuffer()` 与
+  `ListedNormalBuffers()` 里放行;`RawBufDisplayName()` 对远程缓冲区用远程路径
+  对远程根缩短。远程根进了 `RefreshTabRenderRoot()` 的缓存失效比较和
+  `TablineMemoKey()`,工作区切换、远程树换根都会立刻重贴标签;断开后缓冲区
+  仍在列表里,退回尾名。
+- Git:`CurrentGitDir()` 对远程缓冲区返回 `''`,`RequestGitDir('')` 直接返回
+  ——不发请求、不轮询,连 daemon 都不会为它启动;`GitStr()` 对空目录本来就
+  渲染为空,段位内容交给 simplegit 为该缓冲区发布的 `b:simplegit_status_dict`
+  (`SimpleGitStatus()` 已经读它)。sshfs 投影(`mode` 为 `'sshfs'`、目录在
+  `local_root` 下,`IsSshfsProjection()`)不再请求 watch(FUSE 挂载收不到远端
+  改动的 inotify 事件,watch 一旦授予,轮询就永久停了),定时器对它的轮询最多
+  每 10 秒一次(`g:simpleline_git_interval` 更长时取更长者);BufEnter/写入/
+  焦点/`:SimpleLineGitRefresh` 仍然立刻询问,时间从任意来源的上一次请求起算。
+- `:SimpleLineHealth` 多一行 `remote workspace: ssh:host (mode virtual,
+  segment on, this buffer remote)`(没装时 `simpleremote absent`),Git interval
+  一行对远程缓冲区说 `remote, not queried`,对 sshfs 说 `polled every 10000ms,
+  sshfs`。
+- 测试:新增 `tests/vim/remote.vim`,已接入 `make check`。simpleremote 本身不上
+  runtimepath,只按文档 stub 它的表面(`g:SimpleRemoteStatusline`、
+  `g:simpleremote_status`/`_workspace`/`_event`、`doautocmd User SimpleRemote*`)
+  ;Git 那半用一个记录每次 `git_info`/`watch` 请求的假 daemon,"有没有被问、
+  多久问一次"是从外面数出来的事实。
+
 ## Unreleased - 2026-08-08
 
 ### 修复:被拒绝的 watch 不再吃掉一个已经生效的 watch

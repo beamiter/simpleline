@@ -13,7 +13,8 @@ VIM_TESTS := tests/vim/run.vim \
 	tests/vim/git_watch.vim \
 	tests/vim/git_watch_files.vim \
 	tests/vim/daemon_restart.vim \
-	tests/vim/sections.vim
+	tests/vim/sections.vim \
+	tests/vim/remote.vim
 
 .PHONY: check test rust-test vim-test install vim-core defcompile core-verify
 

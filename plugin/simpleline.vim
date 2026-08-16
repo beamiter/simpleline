@@ -56,6 +56,9 @@ g:simpleline_show_encoding = ConfigFlag('simpleline_show_encoding', 1)
 g:simpleline_show_fileformat = ConfigFlag('simpleline_show_fileformat', 1)
 g:simpleline_show_position = ConfigFlag('simpleline_show_position', 1)
 g:simpleline_show_lsp = ConfigFlag('simpleline_show_lsp', 1)
+# The simpleremote workspace segment ('ssh:host:project'); it renders nothing
+# without simpleremote or while disconnected.
+g:simpleline_show_remote = ConfigFlag('simpleline_show_remote', 1)
 g:simpleline_show_search = ConfigFlag('simpleline_show_search', 1)
 # searchcount() budget for the search segment. Its result is memoized on every
 # input searchcount() reads, so these only bound the cost of a real recompute:

@@ -26,10 +26,11 @@ options that it replaced.
 
 Beyond mode/file/Git/position, the statusline can show a search count while
 'hlsearch' highlighting is active, a REC @reg indicator while recording a
-macro, and error/warning counts from an auto-detected diagnostics provider
-(coc.nvim, ALE, or vim-lsp — first match wins). The tabline accepts mouse
-clicks: left click switches to the clicked buffer, middle click deletes it
-when it has no unsaved changes.
+macro, error/warning counts from an auto-detected diagnostics provider
+(coc.nvim, ALE, or vim-lsp — first match wins), and the simpleremote
+workspace you are connected to (see |simpleline-simpleremote|). The tabline
+accepts mouse clicks: left click switches to the clicked buffer, middle click
+deletes it when it has no unsaved changes.
 
 The Git segment also names an operation that needs attention — REBASE, MERGE,
 CHERRY-PICK, REVERT, BISECT, or AM — and keeps it visible in compact windows.
@@ -118,6 +119,8 @@ g:simpleline_show_encoding            1
 g:simpleline_show_fileformat          1
 g:simpleline_show_position            1 (active also shows percentage)
 g:simpleline_show_lsp                 1
+g:simpleline_show_remote              1 (simpleremote workspace, see
+                                      |simpleline-simpleremote|)
 g:simpleline_show_search              1 (current/total while v:hlsearch)
 g:simpleline_search_maxcount          99 (0 counts every match)
 g:simpleline_search_timeout           20 ms (0 or less never gives up)
@@ -128,7 +131,10 @@ g:simpleline_filename_mode            'native' (native, tail, rel, abbr, abs)
 The default "native" keeps Vim's %f behavior.  "rel" and "abbr" use the
 current SimpleTree root when available, otherwise the current window's cwd;
 outside-root files fall back to their basename.  Unnamed and special buffers
-keep Vim's native labels.                    *g:simpleline_filename_mode*
+keep Vim's native labels.  The one exception is a simpleremote remote://
+buffer, which every mode — "native" included — renders relative to the
+remote workspace root (see |simpleline-simpleremote|).
+                                             *g:simpleline_filename_mode*
 g:simpleline_filetype_icons           {}
 g:simpleline_custom_left              [] (user segments, see below)
 g:simpleline_custom_right             [] (user segments, see below)
@@ -234,7 +240,9 @@ g:simpletabline_show_indexes          1
 g:simpletabline_superscript_index     1
 g:simpletabline_listed_only           1 (0 uses loaded normal buffers)
 g:simpletabline_path_mode             'abbr' (tail, rel, abbr, abs; rel/abbr
-                                      use basename outside the path root)
+                                      use basename outside the path root;
+                                      simpleremote remote:// buffers use
+                                      the remote workspace root)
 g:simpletabline_fallback_cwd_root     1
 g:simpletabline_newbuf_side           'right'
 g:simpletabline_clickable             1 (left click switches, middle deletes)
@@ -329,6 +337,63 @@ in compact windows and renders nothing without simplegit.
 A non-empty g:simplecc_status string is shown as a compatibility LSP/provider
 segment. It is escaped and rendered literally.
 
+                                                    *simpleline-simpleremote*
+                                                    *g:simpleline_show_remote*
+simpleremote connects Vim to an SSH host or a Docker container. Simpleline
+needs nothing from it to load: every hook below is feature-detected at redraw
+time and renders nothing when simpleremote is absent, so the default layout
+is unchanged for everyone else.
+
+The `remote` segment, second in the default left layout right after the
+mode, shows the workspace g:SimpleRemoteStatusline() names — for example
+`ssh:host:project@12ms`, the runtime latency arriving once the probe ran —
+in the SimpleLineRemote group. While the connection is being made it reads
+`connecting ssh:host:project`; disconnected, or with g:simpleline_show_remote
+set to 0, it is empty. Compact windows drop the `@NNms` suffix the way they
+drop ahead/behind. Simpleline redraws on the connection events (User
+SimpleRemoteConnecting, SimpleRemoteConnected, SimpleRemoteWorkspaceChanged,
+SimpleRemoteRuntimeReady, SimpleRemoteTreeRootChanged and
+SimpleRemoteDisconnected), so a transition shows at once rather than on the
+next cursor move. The segment is a layout entry like any other and can be
+moved or dropped through |g:simpleline_sections|.
+
+In simpleremote's virtual mode a remote file is a buffer named
+remote:///abs/path with 'buftype' acwrite and b:vimrc_remote. Such a buffer
+is treated as the file it stands for:
+
+- The filename segment shows the remote path relative to the workspace root
+  (g:simpleremote_workspace.tree_root, or root) in every
+  g:simpleline_filename_mode — "native" too, since %f would print the whole
+  URI; "tail" and "abs" apply as usual. A path outside the root, or a remote
+  buffer of a session that has not reconnected yet, shows the whole remote
+  path. %m and %r are kept.
+- The tabline lists it (an ordinary acwrite buffer is still left out) and
+  labels it under g:simpletabline_path_mode against the same remote root, so
+  it can be picked and jumped to like a local file. The label cache and the
+  render memo follow the remote root, so a workspace switch or a remote tree
+  re-root relabels at once; after a disconnect the buffers stay listed under
+  their basename.
+- The Git segment asks the daemon nothing: `remote:///...` is not a directory
+  anything local can run `git status` in, so no request is sent and no poll
+  runs while such a buffer is current — the daemon is not even spawned on its
+  account. What the segment shows is what simplegit publishes for the buffer
+  in b:simplegit_status_dict (|simpleline-simplegit|), if anything.
+
+In the projected modes (sshfs, docker-bind, local-map) remote files are
+ordinary local paths under g:simpleremote_workspace.local_root and everything
+works as it does locally, with one adjustment for sshfs: the mount is never
+asked to be watched (a FUSE mount delivers no inotify events for edits made
+on the remote side, so a granted watch would silence the poll for good) and
+the timer polls a directory on it at most every 10 s, or every
+g:simpleline_git_interval when that is longer — a `git status` there is a
+network round trip per file. Buffer entry, write, focus and
+:SimpleLineGitRefresh still ask at once.
+
+:SimpleLineHealth prints "remote workspace:" — the status string the segment
+keys on, the workspace mode, whether the segment is on and whether the
+current buffer is remote — and says "remote, not queried" or "polled every
+10000ms, sshfs" on the Git interval line.
+
                                                   *simpleline-custom-segments*
 g:simpleline_custom_left holds user segments after Git/diagnostics and before
 the filename. g:simpleline_custom_right renders between the LSP/provider
@@ -377,7 +442,8 @@ are ignored in favour of the default instead of breaking a redraw.
 
 The built-in segment names, in default order:
 
-  left     mode, recording, git, hunks, diagnostics, custom_left, filename
+  left     mode, remote, recording, git, hunks, diagnostics, custom_left,
+           filename
   right    search, lsp, custom_right, metadata, position
 
 custom_left and custom_right render g:simpleline_custom_left and
@@ -447,6 +513,11 @@ Changes arrive late       Set simpleline_git_watch to 0 if the worktree is on
                           a mount with unreliable change notifications; the
                           poll then runs everywhere again.
 Need daemon errors        Set simpleline_debug to 1 and inspect :messages.
+No remote segment         :SimpleLineHealth prints "remote workspace:";
+                          "simpleremote absent" means the plugin is not
+                          loaded, "disconnected" that nothing is connected.
+                          The segment needs simpleline_show_remote (default
+                          1) and a layout that lists "remote".
 No visible statusline     Check 'laststatus' in :SimpleLineHealth; Simpleline
                           raises values below 2 and restores them on disable.
 

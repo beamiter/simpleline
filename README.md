@@ -9,6 +9,7 @@ Version 0.3 rounds out the daily-driving feature set: search counts, a macro-rec
 - Mode-aware statusline with file state, Git, optional LSP/provider text, metadata, and cursor position.
 - Search count (`3/14`) while highlighting is active, and a `REC @q` macro-recording indicator.
 - Diagnostics segment (`E:n W:n`) with auto-detected providers: coc.nvim, ALE, or vim-lsp.
+- simpleremote workspace segment (`ssh:host:project@12ms`), remote `remote://` buffers named relative to the remote root in the statusline and listed in the tabline, and no Git polling for them.
 - Responsive layout: narrow windows retain the branch/position and hide detailed metadata/counts.
 - Buffer-oriented tabline with relative/abbreviated paths, modified markers, visible jump indexes, overflow indicators, and keyboard picking.
 - Mouse support on the tabline: left click switches buffers, middle click deletes unmodified buffers.
@@ -98,12 +99,13 @@ Set options before Simpleline loads. After changing a visual/runtime option, run
 | `g:simpleline_show_fileformat` | `1` | Show Unix/DOS/Mac file format. |
 | `g:simpleline_show_position` | `1` | Show line/column; the active line also shows percentage. |
 | `g:simpleline_show_lsp` | `1` | Show the compatibility provider described below. |
+| `g:simpleline_show_remote` | `1` | Show the simpleremote workspace segment described below; renders nothing without simpleremote or while disconnected. |
 | `g:simpleline_show_search` | `1` | Show `current/total` search matches while `v:hlsearch` is on. |
 | `g:simpleline_search_maxcount` | `99` | `searchcount()` match limit; exceeding it renders `1/99+`. `0` counts every match. |
 | `g:simpleline_search_timeout` | `20` | `searchcount()` budget in ms. A pattern that exceeds it is not retried in that buffer. `0` never gives up. |
 | `g:simpleline_show_recording` | `1` | Show `REC @reg` while recording a macro. |
 | `g:simpleline_show_diagnostics` | `1` | Show error/warning counts from coc.nvim, ALE, or vim-lsp. |
-| `g:simpleline_filename_mode` | `'native'` | Statusline filename: `'native'`, `'tail'`, `'rel'`, `'abbr'`, or `'abs'`. |
+| `g:simpleline_filename_mode` | `'native'` | Statusline filename: `'native'`, `'tail'`, `'rel'`, `'abbr'`, or `'abs'`. simpleremote `remote://` buffers render relative to the remote root in every mode. |
 | `g:simpleline_filetype_icons` | `{}` | Dictionary merged over built-in icons. |
 | `g:simpleline_custom_left` | `[]` | User segments before the filename, see below. |
 | `g:simpleline_custom_right` | `[]` | User segments on the right, see below. |
@@ -145,7 +147,7 @@ With a `watch`-capable daemon the poll is not the refresh mechanism, it is the f
 | `g:simpletabline_show_indexes` | `1` | Render visible jump indexes. |
 | `g:simpletabline_superscript_index` | `1` | Render indexes as mathematical digits. |
 | `g:simpletabline_listed_only` | `1` | Use listed normal buffers; `0` uses loaded normal buffers. |
-| `g:simpletabline_path_mode` | `'abbr'` | `'tail'`, `'rel'`, `'abbr'`, or `'abs'`; relative modes use the basename outside the root. |
+| `g:simpletabline_path_mode` | `'abbr'` | `'tail'`, `'rel'`, `'abbr'`, or `'abs'`; relative modes use the basename outside the root. simpleremote `remote://` buffers use the remote workspace root. |
 | `g:simpletabline_fallback_cwd_root` | `1` | Use cwd when `simpletree` has no root. |
 | `g:simpletabline_newbuf_side` | `'right'` | Sort newer buffer numbers right (`'left'` reverses them). |
 | `g:simpletabline_clickable` | `1` | Left click switches buffers; middle click deletes unmodified buffers. |
@@ -189,6 +191,12 @@ The legacy `:BufferJump1` … `:BufferJump0` commands remain available.
   files outside that root fall back to their basename. Unnamed and special
   buffers retain Vim's native labels.
 - If `g:simplecc_status` is a non-empty string, it appears as the LSP/provider segment. Its contents are rendered as literal text.
+- simpleremote (SSH/Docker workspaces) is feature-detected at redraw time; nothing here needs it to be installed, and every hook renders nothing without it:
+  - The built-in `remote` segment, second in the default left layout after the mode, shows the workspace `g:SimpleRemoteStatusline()` names — `ssh:host:project@12ms` once the runtime probe has run — in the `SimpleLineRemote` group; `connecting ssh:host:project` while the handshake runs; nothing while disconnected or with `g:simpleline_show_remote = 0`. Compact windows drop the `@NNms` suffix. Simpleline redraws on `User SimpleRemoteConnecting/Connected/WorkspaceChanged/RuntimeReady/TreeRootChanged/Disconnected`, so a transition shows at once. Move or drop it through `g:simpleline_sections`.
+  - In virtual mode a remote file is a buffer named `remote:///abs/path` with `'buftype'` `acwrite` and `b:vimrc_remote`. The filename segment shows its remote path relative to the workspace root (`g:simpleremote_workspace.tree_root`, or `root`) in every `g:simpleline_filename_mode`, `'native'` included — `%f` would print the whole URI; a path outside the root, or a session's remote buffer before the reconnect, shows the whole remote path. The tabline lists such buffers (an ordinary `acwrite` buffer is still left out) and labels them against the same root under `g:simpletabline_path_mode`; a workspace switch or a remote tree re-root relabels at once, and after a disconnect they stay listed under their basename.
+  - The Git daemon is not asked about a remote virtual buffer — `remote:///...` is not a directory anything local can run `git status` in — so no request and no poll happens while one is current, and the daemon is not spawned on its account. The Git segment then shows what simplegit publishes for the buffer in `b:simplegit_status_dict`, if anything.
+  - Over an sshfs projection (`mode` `'sshfs'`, files under `local_root`) the mount is never asked to be watched — a FUSE mount delivers no inotify events for remote-side edits, so a granted watch would silence the poll for good — and the timer polls a directory on it at most every 10 s (or every `g:simpleline_git_interval` when that is longer). Buffer entry, write, focus and `:SimpleLineGitRefresh` still ask at once.
+  - `:SimpleLineHealth` prints `remote workspace: ssh:host (mode virtual, segment on, this buffer remote)` and says `remote, not queried` / `polled every 10000ms, sshfs` on the Git interval line.
 - `g:simpleline_custom_left` adds user segments after Git/diagnostics and before
   the filename; `g:simpleline_custom_right` places them between the LSP/provider
   segment and file metadata. Both use the same entry format:
@@ -212,7 +220,7 @@ The legacy `:BufferJump1` … `:BufferJump0` commands remain available.
         \ }
   ```
 
-  `left` is packed against the left edge and `right` against the right; the `%=` between them is the only thing the walk itself contributes. The built-in names, in default order, are `mode`, `recording`, `git`, `hunks`, `diagnostics`, `custom_left`, `filename` on the left and `search`, `lsp`, `custom_right`, `metadata`, `position` on the right — `custom_left`/`custom_right` render the two lists above in place, so both mechanisms compose. A side that is not mentioned keeps its default, an explicit empty list clears that side, and a malformed value falls back to the default rather than breaking a redraw. An unknown name is skipped and `:SimpleLineHealth` lists it under `segments unknown`.
+  `left` is packed against the left edge and `right` against the right; the `%=` between them is the only thing the walk itself contributes. The built-in names, in default order, are `mode`, `remote`, `recording`, `git`, `hunks`, `diagnostics`, `custom_left`, `filename` on the left and `search`, `lsp`, `custom_right`, `metadata`, `position` on the right — `custom_left`/`custom_right` render the two lists above in place, so both mechanisms compose. A side that is not mentioned keeps its default, an explicit empty list clears that side, and a malformed value falls back to the default rather than breaking a redraw. An unknown name is skipped and `:SimpleLineHealth` lists it under `segments unknown`.
 
   An entry may also be a `{'fn': ..., 'hl': ...}` dictionary inline, needing no registration. `simpleline#RegisterSegment('ticket', {'fn': 'MyTicket', 'hl': 'SimpleLineGit'})` gives one a name a layout can use; `simpleline#SegmentNames()` lists everything available. A registration cannot take a built-in name: built-ins emit Vim format items on purpose, while a registered segment's text is always escaped.
 
@@ -234,6 +242,7 @@ The legacy `:BufferJump1` … `:BufferJump0` commands remain available.
 - Changes arrive late on a network or container mount: set `g:simpleline_git_watch = 0` to keep polling everywhere.
 - A custom statusline should coexist: set `g:simpleline_statusline = 0` or toggle Simpleline. Disable restores values owned before enable and leaves user changes made while active alone.
 - No visible statusline: Simpleline raises `laststatus` to 2 when necessary and restores it on disable; check the value in `:SimpleLineHealth`.
+- No remote segment: `:SimpleLineHealth` prints `remote workspace:` — `simpleremote absent` means the plugin is not loaded, `disconnected` that nothing is connected; the segment also needs `g:simpleline_show_remote` (default `1`) and a layout that lists `remote`.
 - More daemon detail: set `g:simpleline_debug = 1`, reload, and inspect `:messages`.
 
 ## Development
