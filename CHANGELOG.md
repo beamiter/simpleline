@@ -2,6 +2,61 @@
 
 ## Unreleased - 2026-08-16
 
+### 修复:sshfs 挂载点上早已授予的 watch 会永久冻结 Git 段位
+
+simpleremote 的 sshfs 挂载点是一个稳定路径(`ProjectionStateDir()/mounts/<key>`),
+它在新的 Vim 里会复用上一次留下的挂载。于是完全正常的一幕是:什么都还没连上,
+用户就通过 session 恢复、最近文件或者一句 `:e` 打开了挂载点下的文件——那一刻它
+只是一个普通本地目录,daemon 欣然授予 watch;等工作区连上来、发布 `mode` 为
+`'sshfs'` 的 `local_root` 时,`MaybeWatch()` 确实不再申请新的 watch,但**已经拿到
+的那一个从来没有还回去**,而 `GitTimerCb()` 先看 `s_git_watched` 再看
+`IsSshfsProjection()`,于是直接返回——正是这个改动本来要防的那种"轮询永久停摆"。
+FUSE 挂载收不到远端改动的 inotify 事件,所以 Git 段位会一直停在旧内容,直到下一次
+BufEnter/BufWritePost/FocusGained。用假 daemon 复现:工作区出现后 12 秒内 0 次
+`git_info` 请求,`:SimpleLineHealth` 说 `Git interval/timer: 250/2 (this one watched)`。
+
+- `GitTimerCb()` 先判 sshfs 再判 watch:挂载上的目录一律走 `SshfsPollDue()` 的
+  10 秒下限,不再被一个陈旧的 watch 记录挡在门外。
+- 新增 `DropWatch()`:`MaybeWatch()` 认出 sshfs 投影时,把已经授予(或正在申请)
+  的 watch 用一条 `unwatch` 请求还给 daemon,而不只是本地不再申请——只有 daemon
+  能结束它自己授予的 watch,光在本地忘掉会让它继续在一个网络 FUSE 挂载上维持
+  递归 inotify,并继续推送本客户端只会当作"未申请"丢弃的事件。
+- `OnWatchReply()` 现在按 id 区分"我请求的撤销"和"daemon 的拒绝":前者不写进
+  `s_git_watch_refused`。拒绝在 daemon 的整个生命周期里都不重试,如果把自己请求
+  的撤销记成拒绝,这个目录在工作区断开、重新变回普通本地目录之后就再也不会被
+  watch 了。
+- `:SimpleLineHealth` 的 Git interval 一行同样先判 sshfs,报告的是轮询实际的
+  决定顺序,而不是一个已经作废的 watch 记录。
+
+### 修复:`g:simpleremote_workspace.mode` 不是字符串时 `:SimpleLineHealth` 中途中断
+
+`IsSshfsProjection()` 是唯一一处不做类型检查就读这个全局变量的地方
+(`RemoteWorkspace()`/`RemoteRoot()`/`RemoteBufferPath()`/`IsRemoteVirtualBuffer()`
+都检查)。`get(ws, 'mode', '') !=# 'sshfs'` 在 mode 是数字时抛
+`E1030: Using a String as a Number`,`:SimpleLineHealth` 在 Git interval 那一行
+断掉、整份报告一个字也打不出来,Git 请求路径(`RequestGitDir()`/`MaybeWatch()`)
+每次请求都会抛。改成先取 `mode` 再 `type(mode) != v:t_string || mode !=# 'sshfs'`,
+与两行之下 `local_root` 的写法一致。
+
+### 测试:钉住 `User SimpleRemote*` → `simpleline#RefreshRemote()` 这条接线
+
+`tests/vim/remote.vim` 原来用"改 `tree_root` → 触发事件 → tabline 重画了"来证明
+接线存在,但 `Tabline()` 自己就会调 `RefreshTabRenderRoot()` 重算远程根并清标签
+缓存:不触发任何事件,标签一样会变。把整段 autocmd 删掉,整个测试套件依然全绿。
+现在两头都钉:一是断言六个事件各自注册的命令文本里有 `simpleline#RefreshRemote()`
+且落在 `SimpleLineAutoUpdate` 组里;二是钉住 `RefreshRemote()` 唯一独有的行为——
+作废备忘:`&filetype` 是 `TablineMemoKey()` 故意不收的那一个渲染输入,用
+`noautocmd` 改掉它之后备忘会原样返回旧串,只有事件真的清了备忘,下一次
+`Tabline()` 才会带上新图标。删掉 autocmd 或掏空 `RefreshRemote()` 都会让它变红。
+
+同时新增:授予 watch 的假 daemon(`s:WriteDaemon()` 现在带 `grant` 参数,并像真
+daemon 一样应答 `unwatch`)驱动"挂载点上的陈旧 watch"整条路径——还回去、重新
+开始轮询、health 不再说 watched、撤销没有被当成拒绝(工作区消失后还能重新
+watch);非字符串 `mode` 下 `:SimpleLineHealth` 跑到最后一行;以及一条本来只有
+注释、没有断言的"下限取更长的 `g:simpleline_git_interval`"。
+
+## Unreleased - 2026-08-16
+
 ### 新增:接住 simpleremote —— 工作区段位、remote:// 缓冲区的命名与 tabline、不再对远程缓冲区轮询 Git
 
 simpleremote 把 Vim 接到 SSH 主机或 Docker 容器上:虚拟模式下远程文件是名为

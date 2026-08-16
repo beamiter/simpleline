@@ -113,15 +113,23 @@ unlet g:simpleline_sections
 " ---------------------------------------------------- redraw on events ---
 
 " simpleremote's Emit() sets g:simpleremote_event and fires the User event;
-" nothing else redraws, so Simpleline listens. The autocommand must exist and
+" nothing else redraws, so Simpleline listens. Each of the six events must be
+" registered against simpleline#RefreshRemote() — asserting that firing it does
+" not throw would pass just as well with the whole autocommand deleted — and
 " must survive being fired with nothing but the payload set.
 call assert_true(exists('#SimpleLineAutoUpdate#User'),
       \ 'the update group has User autocommands')
-let g:simpleremote_event = {'event': 'SimpleRemoteConnected', 'status': 'ssh:h',
-      \ 'time': localtime(), 'snapshot': {}}
-for s:ev in ['SimpleRemoteConnecting', 'SimpleRemoteConnected',
+let s:remote_events = ['SimpleRemoteConnecting', 'SimpleRemoteConnected',
       \ 'SimpleRemoteWorkspaceChanged', 'SimpleRemoteRuntimeReady',
       \ 'SimpleRemoteTreeRootChanged', 'SimpleRemoteDisconnected']
+let g:simpleremote_event = {'event': 'SimpleRemoteConnected', 'status': 'ssh:h',
+      \ 'time': localtime(), 'snapshot': {}}
+for s:ev in s:remote_events
+  let s:registered = execute('autocmd User ' . s:ev)
+  call assert_match('SimpleLineAutoUpdate', s:registered,
+        \ 'User ' . s:ev . ' is registered in Simpleline''s group: ' . s:registered)
+  call assert_match('simpleline#RefreshRemote()', s:registered,
+        \ 'User ' . s:ev . ' calls simpleline#RefreshRemote(): ' . s:registered)
   let g:simpleremote_event.event = s:ev
   try
     execute 'doautocmd <nomodeline> User ' . s:ev
@@ -235,12 +243,9 @@ bwipeout!
 execute 'buffer ' . s:other
 
 " The remote root is a memo input: a remote tree re-root or a workspace switch
-" must re-render the labels, through the event or through the key alone.
+" re-renders the labels off the key alone, with no event needed.
 let s:before = simpleline#Tabline()
 let g:simpleremote_workspace.tree_root = '/a/b'
-let g:simpleremote_event = {'event': 'SimpleRemoteTreeRootChanged', 'status': 'ssh:h',
-      \ 'time': localtime(), 'root': '/a/b', 'workspace': '/a', 'mode': 'virtual'}
-doautocmd <nomodeline> User SimpleRemoteTreeRootChanged
 let s:after = simpleline#Tabline()
 call assert_notequal(s:before, s:after, 'a tree re-root re-renders the tabline')
 call assert_match('deep/c.txt', s:after, 'labels follow the new root')
@@ -248,6 +253,52 @@ call assert_notmatch('b/deep/c.txt', s:after)
 let g:simpleremote_workspace.tree_root = '/a'
 call assert_equal(s:before, simpleline#Tabline(),
       \ 'the remote root is in the memo key, so restoring it restores the render without an event')
+
+" What the event itself is for. Because the key covers the root, a re-root is
+" no test of the wiring at all — so this pins the one thing
+" simpleline#RefreshRemote() does that a Tabline() call does not: clear the
+" memo. The icon comes from &filetype, deliberately the one rendering input
+" left out of TablineMemoKey() (a FileType autocommand invalidates instead), so
+" changing it with autocommands off leaves a render the memo believes is still
+" current and the next Tabline() betrays whether anything cleared it. The icon
+" is only drawn in the powerline layout, hence the re-enable.
+let g:simpleline_nerdfont = 1
+let g:simpleline_separator = 'arrow'
+let g:simpleline_filetype_icons = {'python': 'PY'}
+call simpleline#Disable()
+call simpleline#Enable()
+call simpleline#InvalidateTabline()
+let s:memoized = simpleline#Tabline()
+noautocmd call setbufvar(s:other, '&filetype', 'python')
+call assert_equal(s:memoized, simpleline#Tabline(),
+      \ 'a filetype change alone leaves the memoized render in place')
+let g:simpleremote_event = {'event': 'SimpleRemoteConnected', 'status': 'ssh:h',
+      \ 'time': localtime(), 'snapshot': {}}
+doautocmd <nomodeline> User SimpleRemoteConnected
+let s:refreshed = simpleline#Tabline()
+call assert_notequal(s:memoized, s:refreshed,
+      \ 'a SimpleRemote event clears the tabline memo (simpleline#RefreshRemote())')
+call assert_match('PY', s:refreshed, 'and the re-render is the current one')
+
+" Every one of the six does it, not just the one wired by accident.
+for s:ev in s:remote_events
+  call simpleline#InvalidateTabline()
+  noautocmd call setbufvar(s:other, '&filetype', '')
+  let s:memoized = simpleline#Tabline()
+  noautocmd call setbufvar(s:other, '&filetype', 'python')
+  call assert_equal(s:memoized, simpleline#Tabline(), s:ev . ': the memo holds')
+  let g:simpleremote_event.event = s:ev
+  execute 'doautocmd <nomodeline> User ' . s:ev
+  call assert_notequal(s:memoized, simpleline#Tabline(),
+        \ 'User ' . s:ev . ' must clear the tabline memo')
+endfor
+noautocmd call setbufvar(s:other, '&filetype', '')
+let g:simpleline_filetype_icons = {}
+let g:simpleline_nerdfont = 0
+let g:simpleline_separator = 'plain'
+call simpleline#Disable()
+call simpleline#Enable()
+call simpleline#InvalidateTabline()
 
 " Disconnected: g:simpleremote_workspace is unlet before the event fires. The
 " buffers stay (they are still buffers) but fall back to their tail.
@@ -283,16 +334,39 @@ call assert_match('remote workspace: ssh:h (mode virtual, segment on, this buffe
 call assert_match('this one remote, not queried', s:health,
       \ 'health says the Git poll is off for a remote buffer')
 
+" g:simpleremote_workspace belongs to another plugin, so every read of it is
+" type-checked. A number where the mode should be must not abort the report:
+" the Git-interval line asks IsSshfsProjection() about every local buffer, and
+" ==# against a number throws E1030 and truncates the output mid-line.
+new
+let g:simpleremote_workspace.mode = 0
+let s:bad = ''
+try
+  let s:bad = execute('SimpleLineHealth')
+catch
+  call assert_report('SimpleLineHealth threw on a non-string workspace mode: ' . v:exception)
+endtry
+call assert_match('separator:', s:bad,
+      \ 'the report runs to its last line with a non-string mode: ' . s:bad)
+call assert_match('Git interval/timer: .* (this one polled)', s:bad,
+      \ 'a non-string mode is not an sshfs projection')
+call assert_match('mode none', s:bad, 'and it reads as no mode at all')
+let g:simpleremote_workspace.mode = 'virtual'
+bwipeout!
+
 execute 'bwipeout! ' . s:other
 execute 'bwipeout! ' . s:deep
 call simpleline#Disable()
 
 " ------------------------------------------------ git: no poll over remote ---
 
-" A fake daemon that logs every git_info and watch request, answers git_info
-" for whatever path was asked, and refuses every watch — so a directory it is
-" asked about keeps being polled, which is what makes "was it asked" and "how
-" often" observable from the outside.
+" A fake daemon that logs every git_info, watch and unwatch request and answers
+" git_info for whatever path was asked. Its answer to a watch is a parameter:
+" the refusing one below leaves every directory on the poll, which is what
+" makes "was it asked" and "how often" observable from the outside, and the
+" granting one further down is what puts a stale watch on a mountpoint. An
+" unwatch is acknowledged with watching false either way, as the real daemon
+" does (src/simpleline/simpleline_daemon.rs, Request::Unwatch).
 let s:log = tempname()
 let s:daemon = tempname()
 let s:version = '{"type":"version","id":%s,"version":"test-daemon","protocol":2'
@@ -302,28 +376,46 @@ let s:git = '{"type":"git_info","id":%s,"path":"%s"'
       \ . ',"deleted":0,"conflicts":0,"stash":0,"operation":"","ahead":0'
       \ . ',"behind":0,"is_git":true,"files":{},"files_truncated":false'
       \ . ',"repo_root":"%s"}'
-let s:refused = '{"type":"watch","id":%s,"path":"%s","watching":false}'
-call writefile([
-      \ '#!/bin/sh',
-      \ 'while IFS= read -r line; do',
-      \ '  id=$(printf ''%s'' "$line" | sed -n ''s/.*"id":\([0-9][0-9]*\).*/\1/p'')',
-      \ '  path=$(printf ''%s'' "$line" | sed -n ''s/.*"path":"\([^"]*\)".*/\1/p'')',
-      \ '  case "$line" in',
-      \ '    *''"type":"version"''*) printf ' . shellescape(s:version . '\n') . ' "$id" ;;',
-      \ '    *''"type":"git_info"''*)',
-      \ '      echo "scanned $path" >> ' . shellescape(s:log),
-      \ '      printf ' . shellescape(s:git . '\n') . ' "$id" "$path" "$path" ;;',
-      \ '    *''"type":"watch"''*)',
-      \ '      echo "watch $path" >> ' . shellescape(s:log),
-      \ '      printf ' . shellescape(s:refused . '\n') . ' "$id" "$path" ;;',
-      \ '  esac',
-      \ 'done',
-      \ ], s:daemon, 'b')
-call setfperm(s:daemon, 'rwx------')
+let s:watch_reply = '{"type":"watch","id":%s,"path":"%s","watching":%s}'
+
+function! s:WriteDaemon(path, grant) abort
+  call writefile([
+        \ '#!/bin/sh',
+        \ 'while IFS= read -r line; do',
+        \ '  id=$(printf ''%s'' "$line" | sed -n ''s/.*"id":\([0-9][0-9]*\).*/\1/p'')',
+        \ '  path=$(printf ''%s'' "$line" | sed -n ''s/.*"path":"\([^"]*\)".*/\1/p'')',
+        \ '  case "$line" in',
+        \ '    *''"type":"version"''*) printf ' . shellescape(s:version . '\n') . ' "$id" ;;',
+        \ '    *''"type":"git_info"''*)',
+        \ '      echo "scanned $path" >> ' . shellescape(s:log),
+        \ '      printf ' . shellescape(s:git . '\n') . ' "$id" "$path" "$path" ;;',
+        \ '    *''"type":"unwatch"''*)',
+        \ '      echo "unwatch $path" >> ' . shellescape(s:log),
+        \ '      printf ' . shellescape(s:watch_reply . '\n') . ' "$id" "$path" false ;;',
+        \ '    *''"type":"watch"''*)',
+        \ '      echo "watch $path" >> ' . shellescape(s:log),
+        \ '      printf ' . shellescape(s:watch_reply . '\n') . ' "$id" "$path" '
+        \       . (a:grant ? 'true' : 'false') . ' ;;',
+        \ '  esac',
+        \ 'done',
+        \ ], a:path, 'b')
+  call setfperm(a:path, 'rwx------')
+endfunction
+
+call s:WriteDaemon(s:daemon, v:false)
 
 function! s:LogLines(prefix) abort
   return filereadable(s:log)
         \ ? len(filter(readfile(s:log), {_, v -> v =~# '^' . a:prefix . ' '})) : 0
+endfunction
+
+function! s:HealthLine(pattern) abort
+  for line in split(execute('SimpleLineHealth'), "\n")
+    if line =~# a:pattern
+      return line
+    endif
+  endfor
+  return ''
 endfunction
 
 let g:simpleline_git_enabled = 1
@@ -402,6 +494,10 @@ call assert_equal(0, s:LogLines('watch'), 'still no watch after the refresh')
 
 " The floor follows a longer g:simpleline_git_interval; a shorter one is not
 " honoured over the mount.
+let g:simpleline_git_interval = 30000
+call assert_match('this one polled every 30000ms, sshfs', s:HealthLine('Git interval'),
+      \ 'an interval longer than the floor is the one that counts')
+let g:simpleline_git_interval = 250
 call simpleline#Stop()
 call simpleline#Disable()
 
@@ -420,7 +516,63 @@ call assert_true(s:LogLines('scanned') > s:before_scans,
 call simpleline#Stop()
 call simpleline#Disable()
 
+" ------------------------------ git: a watch granted before the mount showed ---
+
+" simpleremote's mountpoint is a stable path it reuses between Vims, so a
+" buffer under it is routinely opened — session restore, MRU, plain :edit —
+" while nothing is connected. The daemon then grants a watch over what turns
+" out to be a FUSE mount, and inotify there reports nothing a remote peer
+" does. Declining to *ask* once the workspace appears is not enough: the grant
+" already made would keep the directory off the poll for the rest of the
+" session, which is the very failure the floor exists to prevent. It has to be
+" given back.
 unlet g:simpleremote_workspace
+let s:granting = tempname()
+call s:WriteDaemon(s:granting, v:true)
+let g:simpleline_daemon_path = s:granting
+call delete(s:log)
+execute 'edit ' . fnameescape(s:repo . '/mount/src/file.txt')
+call simpleline#Enable()
+sleep 900m
+call assert_true(s:LogLines('watch') > 0,
+      \ 'with nothing connected the mountpoint is an ordinary directory, and watched')
+call assert_match('this one watched', s:HealthLine('Git interval'),
+      \ 'health agrees it is watched')
+let s:watched_scans = s:LogLines('scanned')
+sleep 900m
+call assert_equal(s:watched_scans, s:LogLines('scanned'),
+      \ 'and a watched directory is not polled')
+
+" The workspace is published over the same local_root.
+let g:simpleremote_workspace = {'id': 5, 'kind': 'ssh', 'target': 'h',
+      \ 'root': '/srv/proj', 'tree_root': '/srv/proj',
+      \ 'local_root': s:repo . '/mount', 'mode': 'sshfs',
+      \ 'uri': 'remote:///srv/proj'}
+sleep 900m
+call assert_true(s:LogLines('unwatch') > 0,
+      \ 'the watch made before the mount was known is given back')
+call assert_true(s:LogLines('scanned') > s:watched_scans,
+      \ 'and the directory is polled again instead of frozen')
+call assert_match('this one polled every 10000ms, sshfs', s:HealthLine('Git interval'),
+      \ 'health reports the slowed poll, not a watch')
+call assert_match('0 dir(s) watched', s:HealthLine('git watch:'),
+      \ 'the grant is gone from this client too: ' . s:HealthLine('git watch:'))
+call assert_notmatch('refused', s:HealthLine('git watch:'),
+      \ 'a withdrawal this client asked for is not a refusal: ' . s:HealthLine('git watch:'))
+
+" Which matters when the workspace goes away: a refusal is remembered for the
+" life of the daemon, so recording one here would leave the directory polling
+" for good once it is an ordinary local directory again.
+let s:watches = s:LogLines('watch')
+unlet g:simpleremote_workspace
+call simpleline#RequestGitRefresh()
+sleep 500m
+call assert_true(s:LogLines('watch') > s:watches,
+      \ 'the directory can be watched again once it is no longer a projection')
+call simpleline#Stop()
+call simpleline#Disable()
+call delete(s:granting)
+
 cd /
 call delete(s:daemon)
 call delete(s:log)

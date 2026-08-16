@@ -215,6 +215,12 @@ refused watch withdraws no directory, so an over-sized or unwatchable worktree
 never costs a repository that is already watched. This matters because a
 refusal is not retried until the daemon restarts.
 
+Simpleline gives a watch back of its own accord in one case: a directory that
+turns out to be an sshfs projection of a SimpleRemote workspace (see
+|simpleline-simpleremote|). That withdrawal is this client's own request, not
+a refusal, so it is not remembered — the directory is watched again like any
+other once it is no longer a projection.
+
 Unsolicited events are the one exception to "every reply is correlated to its
 request by id". They carry id 0 and are correlated by path instead, against
 the directories this client asked to watch and the daemon confirmed; an event
@@ -388,6 +394,16 @@ the timer polls a directory on it at most every 10 s, or every
 g:simpleline_git_interval when that is longer — a `git status` there is a
 network round trip per file. Buffer entry, write, focus and
 :SimpleLineGitRefresh still ask at once.
+
+A watch may already have been granted before the workspace appeared: the
+mountpoint is a stable path SimpleRemote reuses between sessions, so a buffer
+under it can be opened — session restore, a jump to a recent file, a plain
+:edit — while nothing is connected. Such a watch is given back with an
+unwatch request as soon as the mount is known, and the directory returns to
+the slowed poll; declining to ask for a new one would otherwise leave the
+Git segment frozen until the next buffer entry, write or focus. Giving a
+watch back this way is not a refusal, so the directory can be watched again
+once it is an ordinary local directory (see |simpleline-git-watch|).
 
 :SimpleLineHealth prints "remote workspace:" — the status string the segment
 keys on, the workspace mode, whether the segment is on and whether the

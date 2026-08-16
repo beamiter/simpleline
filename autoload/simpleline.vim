@@ -36,6 +36,13 @@ var s_git_refresh_again: dict<bool> = {}
 var s_git_watched: dict<bool> = {}
 var s_git_watch_pending: dict<bool> = {}
 var s_git_watch_refused: dict<bool> = {}
+# The ids of the 'unwatch' requests this client sent, so that the withdrawal
+# they produce is not read as the daemon refusing the directory.  Both arrive
+# as the same `watch` event with watching false; only the id tells "I asked to
+# stop" from "you cannot have this one" — and the second must be recorded as a
+# refusal while the first must not, or a directory given back once could never
+# be watched again for the life of the daemon.
+var s_git_unwatch_pending: dict<bool> = {}
 # The want_files each watch was last asked for.  A push answers no request, so
 # the flag travels with the watch and then stays frozen in the daemon; this is
 # what lets MaybeWatch() notice that the options have moved away from what the
@@ -288,7 +295,13 @@ def IsSshfsProjection(dir: string): bool
     return false
   endif
   var ws = RemoteWorkspace()
-  if get(ws, 'mode', '') !=# 'sshfs'
+  # Type-checked like every other read of the global: g:simpleremote_workspace
+  # belongs to another plugin (or to whatever set it by hand), and comparing a
+  # number against a string with ==# aborts the caller with E1030 — which for
+  # this helper means :SimpleLineHealth truncated mid-report and every Git
+  # request path throwing.
+  var mode = get(ws, 'mode', '')
+  if type(mode) != v:t_string || mode !=# 'sshfs'
     return false
   endif
   var local_root = get(ws, 'local_root', '')
@@ -2487,6 +2500,7 @@ def ClearPending()
   s_git_watch_pending = {}
   s_git_watch_refused = {}
   s_git_watch_files = {}
+  s_git_unwatch_pending = {}
 enddef
 
 def TakePending(id: number): string
@@ -2630,15 +2644,22 @@ def OnGitInfo(ev: dict<any>)
   endif
 enddef
 
-# A watch reply, or an unsolicited withdrawal carrying id 0.  Either way the
-# payload is the daemon's own account of what it is watching, and this client's
-# poll follows it: what the daemon reports, the timer does not ask for.
+# A watch reply, the acknowledgement of an unwatch, or an unsolicited
+# withdrawal carrying id 0.  Either way the payload is the daemon's own account
+# of what it is watching, and this client's poll follows it: what the daemon
+# reports, the timer does not ask for.
 def OnWatchReply(ev: dict<any>)
   var path = get(ev, 'path', v:null)
   var watching = get(ev, 'watching', v:null)
   if type(path) != v:t_string || path ==# '' || type(watching) != v:t_bool
     DebugLog('ignored malformed watch response')
     return
+  endif
+  var id = get(ev, 'id', 0)
+  var key = type(id) == v:t_number ? string(id) : ''
+  var withdrawn_by_us = key !=# '' && has_key(s_git_unwatch_pending, key)
+  if withdrawn_by_us
+    remove(s_git_unwatch_pending, key)
   endif
   if has_key(s_git_watch_pending, path)
     remove(s_git_watch_pending, path)
@@ -2652,6 +2673,13 @@ def OnWatchReply(ev: dict<any>)
   endif
   if has_key(s_git_watch_files, path)
     remove(s_git_watch_files, path)
+  endif
+  if withdrawn_by_us
+    # This client asked for the withdrawal (DropWatch()), so the directory is
+    # not refused — recording it as such would keep it from ever being watched
+    # again after the workspace it was withdrawn for goes away.  The request
+    # that prompted the drop already asked about it, too.
+    return
   endif
   s_git_watch_refused[path] = true
   # The directory is back on the poll and nothing has reported it since the
@@ -2834,8 +2862,41 @@ def WantWatch(): bool
   endtry
 enddef
 
+# Give a watch back.  Only the daemon can end a watch it granted: forgetting
+# the entry here alone would leave it holding a recursive inotify tree — over
+# the network, for an sshfs mount — and pushing events this client would then
+# log as unsolicited.  The local state is dropped at once all the same, because
+# what matters is that GitTimerCb() starts polling the directory again; the
+# acknowledgement only confirms it.
+def DropWatch(dir: string)
+  if !has_key(s_git_watched, dir) && !has_key(s_git_watch_pending, dir)
+    return
+  endif
+  var id = NextId()
+  if SendReq({type: 'unwatch', id: id, path: dir})
+    s_git_unwatch_pending[string(id)] = true
+  endif
+  for state in [s_git_watched, s_git_watch_pending, s_git_watch_files]
+    if has_key(state, dir)
+      remove(state, dir)
+    endif
+  endfor
+enddef
+
 def MaybeWatch(dir: string)
-  if !WantWatch() || IsSshfsProjection(dir)
+  # An sshfs projection is never watched: a FUSE mount gets no inotify event
+  # for an edit made on the remote side, so a granted watch would silence the
+  # poll for good.  One may already have been granted, though — simpleremote's
+  # mountpoint is a stable path it reuses between sessions, so a buffer under
+  # it can be opened (session restore, MRU, plain :edit) before the workspace
+  # is published and the daemon asked to watch a directory nobody yet knew was
+  # a mount.  This is where such a grant is given back; without that the timer
+  # would find the directory watched and never poll it again.
+  if IsSshfsProjection(dir)
+    DropWatch(dir)
+    return
+  endif
+  if !WantWatch()
     return
   endif
   if has_key(s_git_watch_pending, dir) || has_key(s_git_watch_refused, dir)
@@ -2914,6 +2975,19 @@ def GitTimerCb(_id: number)
   if dir ==# ''
     return
   endif
+  # The mount is decided before the watch, not after.  A watch is never asked
+  # for over an sshfs projection (MaybeWatch()), but one granted before the
+  # workspace was published is still in s_git_watched, and it reports nothing
+  # a remote peer does; taking the watched branch below would freeze the
+  # segment for the rest of the session — the exact failure the floor exists
+  # to prevent.  RequestGitDir() hands the stale grant back through
+  # MaybeWatch() once the request is away.
+  if IsSshfsProjection(dir)
+    if SshfsPollDue(dir)
+      RequestGitDir(dir)
+    endif
+    return
+  endif
   # The point of the whole feature: a directory the daemon reports on is not
   # asked about.  Polling it anyway would spawn `git status` over the worktree
   # every interval to learn what the daemon has already undertaken to say.
@@ -2923,9 +2997,6 @@ def GitTimerCb(_id: number)
     # it, want_files would only ever be renegotiated by an autocommand that
     # happened to fire afterwards, or not at all.
     MaybeWatch(dir)
-    return
-  endif
-  if IsSshfsProjection(dir) && !SshfsPollDue(dir)
     return
   endif
   RequestGitDir(dir)
@@ -3205,10 +3276,10 @@ export def Health()
   echo '  Git interval/timer: ' .. string(get(g:, 'simpleline_git_interval', 2000))
         \ .. '/' .. (s_git_timer == 0 ? 'stopped' : string(s_git_timer))
         \ .. ' (this one ' .. (git_dir ==# '' ? 'remote, not queried'
-        \   : has_key(s_git_watched, git_dir) ? 'watched'
         \   : IsSshfsProjection(git_dir) ? 'polled every '
         \     .. max([ConfNumber('simpleline_git_interval', 2000), SSHFS_POLL_MS])
-        \     .. 'ms, sshfs' : 'polled') .. ')'
+        \     .. 'ms, sshfs'
+        \   : has_key(s_git_watched, git_dir) ? 'watched' : 'polled') .. ')'
   echo '  git watch: ' .. (ConfBool('simpleline_git_watch', true) ? 'on' : 'off')
         \ .. '/' .. (WantWatch() ? 'negotiated' : 'unavailable')
         \ .. ', ' .. len(s_git_watched) .. ' dir(s) watched'
