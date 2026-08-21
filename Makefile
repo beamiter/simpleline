@@ -1,5 +1,6 @@
 VIM ?= vim
 VIM_TESTS := tests/vim/run.vim \
+	tests/vim/version.vim \
 	tests/vim/config_types.vim \
 	tests/vim/layout.vim \
 	tests/vim/features.vim \

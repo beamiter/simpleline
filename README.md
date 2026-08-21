@@ -2,7 +2,9 @@
 
 Simpleline is a responsive statusline and buffer tabline for Vim 9. It keeps rendering in Vim9script and moves Git work to a small asynchronous Rust daemon, so editing never waits for `git status`.
 
-Version 0.3 rounds out the daily-driving feature set: search counts, a macro-recording indicator, LSP diagnostics from coc.nvim/ALE/vim-lsp, mouse clicks on the tabline, and Git stash/conflict counts — all on the same escaped, lifecycle-safe core that 0.2 established.
+Version 0.4 adds event-driven Git refreshes, per-file tabline state and
+declarative statusline sections while retaining the search, diagnostics,
+recording and mouse features established in 0.3.
 
 ## Features
 

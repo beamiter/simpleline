@@ -4,7 +4,7 @@ if exists('g:loaded_simpleline')
   finish
 endif
 g:loaded_simpleline = 1
-g:simpleline_version = '0.3.0'
+g:simpleline_version = '0.4.0'
 
 def ConfigFlag(name: string, default_value: number): number
   var value = get(g:, name, default_value)

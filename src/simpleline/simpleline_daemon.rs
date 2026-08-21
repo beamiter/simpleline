@@ -3,7 +3,10 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, HashMap, VecDeque},
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
     time::Duration,
 };
 use tokio::io::{self, AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
@@ -145,7 +148,24 @@ where
     Ok(())
 }
 
-type EventTx = tokio::sync::mpsc::Sender<String>;
+#[derive(Clone)]
+struct EventTx {
+    sender: tokio::sync::mpsc::Sender<String>,
+    stalled: Arc<AtomicBool>,
+}
+
+impl EventTx {
+    fn new(sender: tokio::sync::mpsc::Sender<String>) -> Self {
+        Self {
+            sender,
+            stalled: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    fn is_stalled(&self) -> bool {
+        self.stalled.load(Ordering::Acquire)
+    }
+}
 
 /// Features a client may ask for by name rather than infer from a version
 /// number. The supervisor keeps this dictionary and answers `HasCap()` from it,
@@ -157,8 +177,20 @@ fn capabilities(watching: bool) -> BTreeMap<&'static str, bool> {
 }
 
 async fn send_event(out: &EventTx, evt: &Event) {
+    if out.is_stalled() {
+        return;
+    }
     if let Ok(line) = serde_json::to_string(evt) {
-        let _ = out.send(line).await;
+        match tokio::time::timeout(Duration::from_secs(2), out.sender.send(line)).await {
+            Ok(Ok(())) => {}
+            Ok(Err(_)) | Err(_) => {
+                // One ordered sender owns the queue.  If a client stops
+                // reading for longer than the deadline, fail the protocol
+                // session as a whole instead of spawning unordered overflow
+                // tasks or blocking before stdin EOF can be observed.
+                out.stalled.store(true, Ordering::Release);
+            }
+        }
     }
 }
 
@@ -891,13 +923,13 @@ async fn report_request_completion(result: Result<(), JoinError>, tx: &EventTx) 
 }
 
 fn finish_request_line(mut bytes: Vec<u8>, too_long: bool) -> Result<String, String> {
-    if too_long {
+    if bytes.last() == Some(&b'\r') {
+        bytes.pop();
+    }
+    if too_long || bytes.len() > MAX_REQUEST_LINE_BYTES {
         return Err(format!(
             "request line exceeds {MAX_REQUEST_LINE_BYTES} bytes"
         ));
-    }
-    if bytes.last() == Some(&b'\r') {
-        bytes.pop();
     }
     String::from_utf8(bytes).map_err(|_| "request line is not valid UTF-8".to_string())
 }
@@ -926,7 +958,9 @@ where
         let consumed = newline.map_or(available.len(), |position| position + 1);
 
         if !too_long {
-            if bytes.len().saturating_add(content_len) > MAX_REQUEST_LINE_BYTES {
+            // Keep one framing byte until the record ends.  A terminal CR in
+            // CRLF is not part of the JSONL payload's documented size limit.
+            if bytes.len().saturating_add(content_len) > MAX_REQUEST_LINE_BYTES.saturating_add(1) {
                 too_long = true;
                 bytes.clear();
             } else {
@@ -941,15 +975,12 @@ where
     }
 }
 
-async fn run<R, W>(input: R, output: W) -> io::Result<()>
+async fn process_requests<R>(input: R, out_tx: EventTx) -> io::Result<()>
 where
     R: AsyncRead + Unpin,
-    W: AsyncWrite + Unpin + Send + 'static,
 {
     let mut input = BufReader::new(input);
 
-    let (out_tx, out_rx) = tokio::sync::mpsc::channel::<String>(1024);
-    let writer = tokio::spawn(stdout_writer(output, out_rx));
     let git_limiter = Arc::new(Semaphore::new(MAX_CONCURRENT_GIT_REQUESTS));
     let mut requests = JoinSet::new();
     // Started eagerly so the handshake can say truthfully whether this daemon
@@ -957,7 +988,13 @@ where
     // watch descriptors until a directory is actually requested.
     let mut watch_service = WatchService::start(out_tx.clone());
 
-    while let Some(line) = read_request_line(&mut input).await? {
+    loop {
+        if out_tx.is_stalled() {
+            break;
+        }
+        let Some(line) = read_request_line(&mut input).await? else {
+            break;
+        };
         while let Some(result) = requests.try_join_next() {
             report_request_completion(result, &out_tx).await;
         }
@@ -1059,6 +1096,10 @@ where
                 send_event(&out_tx, &Event::Watch { id, path, watching }).await;
             }
             Request::Unwatch { id, path } => {
+                if let Err(message) = validate_request_path(&path) {
+                    send_event(&out_tx, &Event::Error { id, message }).await;
+                    continue;
+                }
                 if let Some(service) = watch_service.as_mut() {
                     service.drop_dir(&path);
                 }
@@ -1085,9 +1126,54 @@ where
     drop(watch_service);
     drop(out_tx);
 
-    writer
+    Ok(())
+}
+
+async fn run<R, W>(input: R, output: W) -> io::Result<()>
+where
+    R: AsyncRead + Unpin,
+    W: AsyncWrite + Unpin + Send + 'static,
+{
+    let (sender, out_rx) = tokio::sync::mpsc::channel::<String>(1024);
+    let out_tx = EventTx::new(sender);
+    let writer = tokio::spawn(stdout_writer(output, out_rx));
+    let result = process_requests(input, out_tx).await;
+    let writer_result = writer
         .await
-        .map_err(|error| io::Error::other(format!("stdout writer task failed: {error}")))?
+        .map_err(|error| io::Error::other(format!("stdout writer task failed: {error}")))?;
+    result?;
+    writer_result
+}
+
+fn blocking_stdout_writer(mut rx: tokio::sync::mpsc::Receiver<String>) {
+    use std::io::Write;
+
+    let stdout = std::io::stdout();
+    let mut out = stdout.lock();
+    while let Some(line) = rx.blocking_recv() {
+        if out.write_all(line.as_bytes()).is_err() || out.write_all(b"\n").is_err() {
+            break;
+        }
+        let _ = out.flush();
+    }
+}
+
+async fn run_stdio() -> io::Result<()> {
+    let (sender, out_rx) = tokio::sync::mpsc::channel::<String>(1024);
+    let out_tx = EventTx::new(sender);
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    let writer = std::thread::spawn(move || {
+        blocking_stdout_writer(out_rx);
+        let _ = done_tx.send(());
+    });
+    let result = process_requests(tokio::io::stdin(), out_tx).await;
+    if done_rx
+        .recv_timeout(std::time::Duration::from_secs(2))
+        .is_ok()
+    {
+        let _ = writer.join();
+    }
+    result
 }
 
 const USAGE: &str = "\
@@ -1146,7 +1232,7 @@ async fn self_test() -> Result<(), String> {
 async fn main() -> std::process::ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
-        None => match run(tokio::io::stdin(), tokio::io::stdout()).await {
+        None => match run_stdio().await {
             Ok(()) => std::process::ExitCode::SUCCESS,
             Err(error) => {
                 eprintln!("simpleline-daemon: {error}");
@@ -1181,12 +1267,12 @@ async fn main() -> std::process::ExitCode {
 #[cfg(test)]
 mod tests {
     use super::{
-        Event, GIT_REPOSITORY_ENV_VARS, GitStatus, MAX_REQUEST_LINE_BYTES, MAX_REQUEST_PATH_BYTES,
-        MAX_TRACKED_PATHS, MAX_WATCH_TREE_DIRS, MAX_WATCHED_DIRS, PROTOCOL_VERSION, Request,
-        WatchEntry, WatchService, capabilities, count_dirs_bounded, detect_git_operation,
-        discover_repo, git_status_command, git_version_supports_show_stash,
+        Event, EventTx, GIT_REPOSITORY_ENV_VARS, GitStatus, MAX_REQUEST_LINE_BYTES,
+        MAX_REQUEST_PATH_BYTES, MAX_TRACKED_PATHS, MAX_WATCH_TREE_DIRS, MAX_WATCHED_DIRS,
+        PROTOCOL_VERSION, Request, WatchEntry, WatchService, capabilities, count_dirs_bounded,
+        detect_git_operation, discover_repo, git_status_command, git_version_supports_show_stash,
         interpret_status_failure, owning_root, parse_git_status, read_request_line, run,
-        validate_request_path,
+        send_event, validate_request_path,
     };
     use std::collections::{BTreeMap, HashMap};
     use std::path::{Path, PathBuf};
@@ -1730,6 +1816,43 @@ u UU N... 100644 100644 100644 100644 1111111 2222222 3333333 conflict.txt
     }
 
     #[tokio::test]
+    async fn ordered_sender_preserves_replies_across_backpressure() {
+        let (sender, mut rx) = tokio::sync::mpsc::channel(1);
+        let tx = EventTx::new(sender);
+        tx.sender.send("already queued".to_string()).await.unwrap();
+        let producer = tokio::spawn(async move {
+            send_event(
+                &tx,
+                &Event::Version {
+                    id: 1,
+                    version: "test",
+                    protocol: PROTOCOL_VERSION,
+                    capabilities: BTreeMap::new(),
+                },
+            )
+            .await;
+            send_event(
+                &tx,
+                &Event::Version {
+                    id: 2,
+                    version: "test",
+                    protocol: PROTOCOL_VERSION,
+                    capabilities: BTreeMap::new(),
+                },
+            )
+            .await;
+        });
+        assert_eq!(rx.recv().await.as_deref(), Some("already queued"));
+        let first: serde_json::Value = serde_json::from_str(&rx.recv().await.unwrap()).unwrap();
+        let second: serde_json::Value = serde_json::from_str(&rx.recv().await.unwrap()).unwrap();
+        producer.await.unwrap();
+        assert_eq!(
+            (first["id"].as_u64(), second["id"].as_u64()),
+            (Some(1), Some(2))
+        );
+    }
+
+    #[tokio::test]
     async fn rejects_oversized_line_and_continues_with_version_request() {
         let (mut request_writer, request_reader) = tokio::io::duplex(16_384);
         let (response_writer, mut response_reader) = tokio::io::duplex(4096);
@@ -1759,6 +1882,19 @@ u UU N... 100644 100644 100644 100644 1111111 2222222 3333333 conflict.txt
         assert_eq!(events[1]["type"], "version");
         assert_eq!(events[1]["id"], 88);
         assert_eq!(events[1]["protocol"], PROTOCOL_VERSION);
+    }
+
+    #[tokio::test]
+    async fn crlf_at_the_exact_line_limit_is_accepted() {
+        let mut input = vec![b'x'; MAX_REQUEST_LINE_BYTES];
+        input.extend_from_slice(b"\r\n");
+        let mut reader = BufReader::new(input.as_slice());
+        let line = read_request_line(&mut reader)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(line.len(), MAX_REQUEST_LINE_BYTES);
     }
 
     #[tokio::test]
@@ -1879,7 +2015,7 @@ u UU N... 100644 100644 100644 100644 1111111 2222222 3333333 conflict.txt
     /// the other end, and dropping it early would turn a push into a send error.
     fn watch_service() -> Option<(WatchService, tokio::sync::mpsc::Receiver<String>)> {
         let (out, rx) = tokio::sync::mpsc::channel::<String>(64);
-        Some((WatchService::start(out)?, rx))
+        Some((WatchService::start(EventTx::new(out))?, rx))
     }
 
     /// Eviction is the price of granting the 17th watch, which is what the
@@ -2128,6 +2264,29 @@ u UU N... 100644 100644 100644 100644 1111111 2222222 3333333 conflict.txt
         assert_eq!(event["type"], "watch");
         assert_eq!(event["id"], 12);
         assert_eq!(event["watching"], false);
+
+        request_writer.shutdown().await.unwrap();
+        runner.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn unwatch_obeys_the_same_path_bound_as_watch() {
+        let (mut request_writer, request_reader) = tokio::io::duplex(16_384);
+        let (response_writer, response_reader) = tokio::io::duplex(65_536);
+        let runner = tokio::spawn(run(request_reader, response_writer));
+        let mut reader = BufReader::new(response_reader);
+
+        let path = "x".repeat(MAX_REQUEST_PATH_BYTES + 1);
+        let request = serde_json::json!({"type": "unwatch", "id": 13, "path": path});
+        request_writer
+            .write_all(format!("{request}\n").as_bytes())
+            .await
+            .unwrap();
+
+        let event = next_event(&mut reader).await.unwrap();
+        assert_eq!(event["type"], "error");
+        assert_eq!(event["id"], 13);
+        assert!(event["message"].as_str().unwrap().contains("path exceeds"));
 
         request_writer.shutdown().await.unwrap();
         runner.await.unwrap().unwrap();
