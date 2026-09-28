@@ -2028,30 +2028,51 @@ def TablinePickMode(): string
 enddef
 
 # ----------- Mouse support -----------
-# %N@simpleline#TablineClick@ labels; Vim calls this on tabline clicks with the
-# buffer number as minwid. Left click switches, middle click deletes.
-export def TablineClick(minwid: number, clicks: number, button: string, mods: string)
-  if !bufexists(minwid)
-    return
+# Vim marks a clickable region as %{minwid}[Func] ... %[] and hands the callback
+# one dictionary.  The %{minwid}@Func@ ... %X spelling this used to emit is
+# Neovim's: to Vim `%@` is a line break and `%X` a tab-close label, so nothing
+# was ever clickable and the function name itself was printed into the tabline,
+# in the colours of the separator before it.  Builds older than the feature get
+# plain labels rather than text they would print.
+def ClickSupported(): bool
+  return has('statusline_click') == 1
+enddef
+
+def ClickRegion(bufnr: number, label: string): string
+  return '%' .. bufnr .. '[simpleline#TablineClick]' .. label .. '%[]'
+enddef
+
+# Called by Vim with the buffer number as minwid.  Left click switches, middle
+# click deletes.  A non-zero result asks for the redraw the buffer list change
+# needs.
+export def TablineClick(info: dict<any>): number
+  var target: any = get(info, 'minwid', 0)
+  var button: any = get(info, 'button', '')
+  if type(target) != v:t_number || type(button) != v:t_string
+      || !bufexists(target)
+    return 0
   endif
   if button ==# 'm'
-    var modified = getbufvar(minwid, '&modified')
+    var modified = getbufvar(target, '&modified')
     if type(modified) != v:t_string && modified
-      echo '[SimpleLine] buffer ' .. minwid .. ' has unsaved changes'
-      return
+      echo '[SimpleLine] buffer ' .. target .. ' has unsaved changes'
+      return 0
     endif
     try
-      execute 'bdelete ' .. minwid
+      execute 'bdelete ' .. target
     catch
-      DebugLog('failed to delete buffer ' .. minwid .. ': ' .. v:exception)
+      DebugLog('failed to delete buffer ' .. target .. ': ' .. v:exception)
     endtry
+    return 1
   elseif button ==# 'l'
     try
-      execute 'buffer ' .. minwid
+      execute 'buffer ' .. target
     catch
-      DebugLog('failed to switch to buffer ' .. minwid .. ': ' .. v:exception)
+      DebugLog('failed to switch to buffer ' .. target .. ': ' .. v:exception)
     endtry
+    return 1
   endif
+  return 0
 enddef
 
 # ----------- Main tabline -----------
@@ -2168,7 +2189,7 @@ export def Tabline(): string
   var curbn = bufnr('%')
   var style = SeparatorStyle()
   var use_powerline = (style !=# 'plain') && ConfBool('simpleline_nerdfont', true)
-  var clickable = TabConfBool('simpletabline_clickable', true)
+  var clickable = TabConfBool('simpletabline_clickable', true) && ClickSupported()
 
   if use_powerline
     # Powerline-style tabline
@@ -2213,9 +2234,7 @@ export def Tabline(): string
 
       var label = grp_item .. ' ' .. key_part .. icon .. name .. mod_mark
             \ .. GitIconPart(b.bufnr, marks) .. ' '
-      s ..= clickable
-            \ ? '%' .. b.bufnr .. '@simpleline#TablineClick@' .. label .. '%X'
-            \ : label
+      s ..= clickable ? ClickRegion(b.bufnr, label) : label
 
       is_first = false
       prev_group = group
@@ -2276,9 +2295,7 @@ export def Tabline(): string
             \ .. GitIconPart(b.bufnr, marks) .. '%#None#'
 
       var label = key_part .. name_part
-      s ..= clickable
-            \ ? '%' .. b.bufnr .. '@simpleline#TablineClick@' .. label .. '%X'
-            \ : label
+      s ..= clickable ? ClickRegion(b.bufnr, label) : label
 
       first = false
       prev_is_cur = is_cur

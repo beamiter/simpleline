@@ -1,5 +1,24 @@
 # Changelog
 
+## Unreleased - 2026-09-28
+
+### 修复:tabline 的点击区域用的是 Neovim 的写法,在 Vim 里从来点不动,还把函数名画进了 tabline
+
+tabline 给每个 buffer 包的是 `%{bufnr}@simpleline#TablineClick@ … %X`。这是 Neovim 的
+语法;在 Vim 里 `%@` 是换行、`%X` 是关闭标签页的标记,于是没有任何区域可点,而
+`simpleline#TablineClick@` 这 24 个字符被当成普通文本画了出来——用的是它前面那个
+分隔符的高亮,前景和背景都是深色,所以看上去是每个标签前面一段莫名的空白。
+`ComputeVisible()` 量宽度时并不知道这段文本,标签一多实际宽度就超出它算的那个数。
+
+- 点击区域改成 Vim 的 `%{bufnr}[simpleline#TablineClick] … %[]`。
+- `simpleline#TablineClick()` 改为接收 Vim 传入的那一个字典(`minwid`/`button`/…),
+  处理了点击返回 1 要求重绘,否则返回 0。原来的四参数签名是 Neovim 回调的形状,
+  Vim 从来不会那样调用它。
+- 没有 `has('statusline_click')` 的 Vim 输出不带点击区域的标签,而不是把标记当
+  文本画出来。
+- `tests/vim/features.vim` 断言新的写法和字典回调;`tabline_sep.vim`、`layout.vim`
+  的解析同时接受带和不带点击区域的两种输出。
+
 ## Unreleased - 2026-08-16
 
 ### 修复:sshfs 挂载点上早已授予的 watch 会永久冻结 Git 段位

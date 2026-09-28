@@ -218,38 +218,60 @@ execute 'lcd ' .. fnameescape(s:old_cwd)
 call delete(s:path_root, 'rf')
 call delete(s:other_root, 'rf')
 
-" Tabline items are wrapped in click labels bound to their buffer number.
+" Tabline items are wrapped in click regions bound to their buffer number, in
+" Vim's spelling: %{bufnr}[Func] ... %[].  Neovim's %{bufnr}@Func@ ... %X is a
+" line break followed by literal text here, which is what used to be emitted.
 enew!
 silent file click_current.txt
 badd click_target_a.txt
 badd click_target_b.txt
+let s:target = bufnr('click_target_a.txt')
 let s:tabline = simpleline#Tabline()
-call assert_match('@simpleline#TablineClick@', s:tabline)
-call assert_match('%X', s:tabline)
+call assert_notmatch('@', s:tabline)
+call assert_notmatch('%X', s:tabline)
+if has('statusline_click')
+  call assert_match('%' .. s:target .. '\[simpleline#TablineClick\]', s:tabline)
+  call assert_match('%\[\]', s:tabline)
+else
+  " A build without the feature would print the region markers as text.
+  call assert_notmatch('TablineClick', s:tabline)
+endif
 let g:simpletabline_clickable = 0
 call assert_notmatch('TablineClick', simpleline#Tabline())
 let g:simpletabline_clickable = 1
 
+" The callback takes the one dictionary Vim passes, and asks for a redraw only
+" when it changed something.
+function! s:Click(bufnr, button) abort
+  return simpleline#TablineClick({'minwid': a:bufnr, 'nclicks': 1,
+        \ 'button': a:button, 'mods': '', 'winid': 0, 'area': 'tabline'})
+endfunction
+
 " Left click switches to the clicked buffer.
-let s:target = bufnr('click_target_a.txt')
-call simpleline#TablineClick(s:target, 1, 'l', '')
+call assert_equal(1, s:Click(s:target, 'l'))
 call assert_equal(s:target, bufnr('%'))
 
 " Middle click deletes an unmodified buffer.
 let s:other = bufnr('click_target_b.txt')
-call simpleline#TablineClick(s:other, 1, 'm', '')
+call assert_equal(1, s:Click(s:other, 'm'))
 call assert_equal(0, buflisted(s:other))
 
 " Middle click refuses to drop unsaved changes.
 call setbufvar(s:target, '&modified', 1)
-call simpleline#TablineClick(s:target, 1, 'm', '')
+call assert_equal(0, s:Click(s:target, 'm'))
 call assert_equal(1, bufexists(s:target))
 call setbufvar(s:target, '&modified', 0)
 
-" Clicks on vanished buffers are ignored without errors.
+" Right clicks have no action bound.
+call assert_equal(0, s:Click(s:target, 'r'))
+
+" Clicks on vanished buffers, and a dictionary that is not the one Vim passes,
+" are ignored without errors.
 let s:click_error = ''
 try
-  call simpleline#TablineClick(9999, 1, 'l', '')
+  call assert_equal(0, s:Click(9999, 'l'))
+  call assert_equal(0, simpleline#TablineClick({}))
+  call assert_equal(0, simpleline#TablineClick({'minwid': 'x', 'button': 1}))
 catch
   let s:click_error = v:exception
 endtry

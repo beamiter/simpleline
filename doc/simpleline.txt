@@ -251,7 +251,8 @@ g:simpletabline_path_mode             'abbr' (tail, rel, abbr, abs; rel/abbr
                                       the remote workspace root)
 g:simpletabline_fallback_cwd_root     1
 g:simpletabline_newbuf_side           'right'
-g:simpletabline_clickable             1 (left click switches, middle deletes)
+g:simpletabline_clickable             1 (left click switches, middle deletes;
+                                      needs has('statusline_click'))
 g:simpletabline_pick_chars            'asdfjkl;ghqweruiopzxcvbnm'
 g:simpletabline_item_sep              ' | '
 g:simpletabline_key_sep               '  '

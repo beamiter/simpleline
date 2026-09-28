@@ -152,7 +152,7 @@ With a `watch`-capable daemon the poll is not the refresh mechanism, it is the f
 | `g:simpletabline_path_mode` | `'abbr'` | `'tail'`, `'rel'`, `'abbr'`, or `'abs'`; relative modes use the basename outside the root. simpleremote `remote://` buffers use the remote workspace root. |
 | `g:simpletabline_fallback_cwd_root` | `1` | Use cwd when `simpletree` has no root. |
 | `g:simpletabline_newbuf_side` | `'right'` | Sort newer buffer numbers right (`'left'` reverses them). |
-| `g:simpletabline_clickable` | `1` | Left click switches buffers; middle click deletes unmodified buffers. |
+| `g:simpletabline_clickable` | `1` | Left click switches buffers; middle click deletes unmodified buffers. Needs a Vim with `has('statusline_click')`; older builds render plain labels. |
 | `g:simpletabline_pick_chars` | home-row-first alphabet | Keys consumed by picker mode. Duplicates are ignored. |
 | `g:simpletabline_item_sep` | `' \| '` | Separator for plain mode. |
 | `g:simpletabline_key_sep` | two spaces | Gap after indexes in plain mode. |

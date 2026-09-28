@@ -69,18 +69,20 @@ endfunction
 
 " The highlight group named immediately before the item painted with `group`.
 " A separator glyph carries no '%', so the run between the two format items is
-" exactly the separator text.
+" exactly the separator text.  The click region that wraps an item is optional:
+" a Vim without +statusline_click gets the bare label.
 function! s:SepBefore(line, group) abort
   let l:m = matchlist(a:line,
-        \ '%#\([A-Za-z0-9_]\+\)#[^%]*%\d\+@simpleline#TablineClick@%#'
+        \ '%#\([A-Za-z0-9_]\+\)#[^%]*\%(%\d\+\[simpleline#TablineClick\]\)\=%#'
         \ . a:group . '#')
   return empty(l:m) ? '' : l:m[1]
 endfunction
 
-" And the one after it: the wedge that follows the item's own %X terminator.
+" And the one after it: the wedge that follows the item, past the %[] that
+" closes its click region when there is one.
 function! s:SepAfter(line, group) abort
   let l:m = matchlist(a:line,
-        \ '%#' . a:group . '#[^%]*\%(%[^#X][^%]*\)\{-}%X%#\([A-Za-z0-9_]\+\)#')
+        \ '%#' . a:group . '#[^%]*\%(%[^#\[][^%]*\)\{-}\%(%\[\]\)\=%#\([A-Za-z0-9_]\+\)#')
   return empty(l:m) ? '' : l:m[1]
 endfunction
 
